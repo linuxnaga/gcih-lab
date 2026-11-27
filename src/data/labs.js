@@ -9234,4 +9234,988 @@ Count: 1,322 across 211 sessions (last 30 days)`,
       },
     ],
   },
+  {
+    id: 'lab-92',
+    title: 'Responding to a Managed Service Provider Breach',
+    domain: 1,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'Your managed service provider (MSP) emailed that its remote monitoring platform was compromised and attackers may have pushed scripts to customer endpoints. The MSP has admin access to all your servers. Decide what to do in the first hours.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the notice',
+        evidence: r`MSP notice (2026-11-20 07:10)
+"Unauthorized access to our RMM console between 11-18 21:00 and 11-19 04:00 UTC.
+Scripts may have been executed on customer devices. IOCs: script name sync-cfg.ps1,
+domain rmm-cdn-update.example."`,
+        question: 'What is the first priority?',
+        options: [
+          'Wait for the MSP\'s final report',
+          'Cut or restrict the MSP\'s remote access path while you check for the IOCs',
+          'Uninstall all software from the MSP',
+          'Publicly announce a breach',
+        ],
+        correctIndex: 1,
+        hint: 'The trusted channel itself may be hostile.',
+        walkthrough: 'The attacker used the MSP\'s privileged access. Disabling or tightly restricting the RMM agent and the MSP\'s accounts stops further pushes while you investigate. Coordinate so critical monitoring is not lost blindly.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Hunt for the IOCs',
+        evidence: r`EDR query: script sync-cfg.ps1 executed by RMM agent (11-18 to 11-20)
+Hits: 46 servers   Execution time: 11-19 01:12-01:40
+DNS: rmm-cdn-update.example resolved by 46 hosts`,
+        question: 'What does this establish?',
+        options: [
+          'The hits are false positives',
+          'Only the MSP was affected',
+          'The attacker ran the script on 46 of your servers through the RMM agent',
+          'The servers were patched',
+        ],
+        correctIndex: 2,
+        hint: 'The IOC was found in your environment.',
+        walkthrough: 'Execution within the stated window, by the RMM agent, on 46 servers confirms direct impact. Each server is now in scope.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Analyze the script',
+        evidence: r`sync-cfg.ps1 (recovered from EDR)
+- Creates local admin "msp_support2"
+- Downloads payload from rmm-cdn-update.example to C:\ProgramData\rmmcache\svc.exe
+- Registers scheduled task "RMM Cache Sync"`,
+        question: 'Which items must be removed from each host?',
+        options: [
+          'Only the scheduled task',
+          'The local admin account, the downloaded payload, and the scheduled task, plus anything the payload did afterward',
+          'Only the payload',
+          'Nothing, the RMM agent will clean up',
+        ],
+        correctIndex: 1,
+        hint: 'List every change the script made.',
+        walkthrough: 'Removing all of the script\'s changes is the minimum. The payload\'s own activity, such as credential theft or new C2, must also be investigated, which may justify rebuilding.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Manage the relationship',
+        evidence: r`Contract: MSP must notify within 24h, provide logs on request.
+MSP status: still investigating, asks customers not to remove the agent.`,
+        question: 'How should you handle the MSP\'s request?',
+        options: [
+          'Do what the MSP says',
+          'Follow your own risk decision: keep the agent restricted until the MSP proves its console is clean, and request their logs for your tenant',
+          'Terminate the contract immediately',
+          'Ignore the MSP',
+        ],
+        correctIndex: 1,
+        hint: 'Your environment, your decision.',
+        walkthrough: 'Third parties can help, but your organization owns its risk. Request evidence and logs per contract, document communications, and restore access only after verification.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Reduce third-party risk',
+        evidence: r`Proposals
+- MSP accounts through your IdP with MFA and just-in-time access
+- RMM scripts require signing and change approval
+- Separate MSP access tiers per environment
+- Monitor RMM agent actions in your SIEM`,
+        question: 'Why monitor RMM actions in your own SIEM?',
+        options: [
+          'To replace the MSP',
+          'To reduce MSP fees',
+          'Because RMM agents cannot be trusted with logs',
+          'So you can see and alert on what the provider\'s tools do in your environment without relying on the provider\'s visibility',
+        ],
+        correctIndex: 3,
+        hint: 'Trust but verify.',
+        walkthrough: 'Independent logging of privileged third-party actions turns a blind spot into a monitored channel. Combined with JIT access and script signing, a future MSP breach has less reach.',
+      },
+    ],
+  },
+  {
+    id: 'lab-93',
+    title: 'Deciding on Breach Notification',
+    domain: 1,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'An investigation confirmed that attackers accessed a customer support database for three days. Legal, privacy, and communications are waiting for the IR team\'s facts to decide on notification. Provide what they need, accurately and on time.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Establish the clock',
+        evidence: r`Timeline
+2026-11-03  Suspicious query alert (triaged as low)
+2026-11-12  Analyst confirms unauthorized access to support DB
+2026-11-12  IR manager informs DPO
+Regulator: EU GDPR applies (EU customers)`,
+        question: 'When does the GDPR 72-hour notification clock generally start?',
+        options: [
+          'There is no deadline',
+          'On 11-03 when the first alert fired',
+          'When the investigation ends',
+          'When the organization becomes aware of the breach, which here is around 11-12 when unauthorized access was confirmed',
+        ],
+        correctIndex: 3,
+        hint: 'Awareness means reasonable certainty a breach occurred.',
+        walkthrough: 'GDPR requires notifying the supervisory authority within 72 hours of becoming aware of a personal data breach, unless it is unlikely to pose a risk. Awareness is generally when there is reasonable certainty, here 11-12. The delay since 11-03 should be explained.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Determine what data',
+        evidence: r`Tables accessed (DB audit log)
+customers: name, email, phone, country         rows read: 182,400
+tickets:   free-text ticket content              rows read: 61,000
+payments:  no access (separate DB)`,
+        question: 'Why do the free-text tickets need careful review?',
+        options: [
+          'Tickets contain only order numbers',
+          'Tickets are never personal data',
+          'Free text may contain sensitive data that customers typed, such as health information or ID numbers, which raises the risk level',
+          'Free text cannot be analyzed',
+        ],
+        correctIndex: 2,
+        hint: 'Structured columns are easy; free text is not.',
+        walkthrough: 'Ticket text can hold anything. Sampling or scanning it for sensitive categories affects risk assessment and whether individuals must be notified.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Assess the risk',
+        evidence: r`Exfiltration evidence: 4.2 GB outbound from DB jump host to attacker IP, matching export size
+Encryption at rest: yes (key on same server)`,
+        question: 'Does encryption at rest reduce the need to notify here?',
+        options: [
+          'Yes, because the key was on the same server',
+          'Yes, encrypted data is always exempt',
+          'No, the attacker accessed data through the database, so it was readable and exfiltrated in plaintext',
+          'It depends on the color of the data',
+        ],
+        correctIndex: 2,
+        hint: 'Encryption at rest protects stolen disks, not live queries.',
+        walkthrough: 'At-rest encryption does not protect against queries through an authorized connection. Since data was exported, the high-risk exemption based on encryption does not apply.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Provide facts without speculation',
+        evidence: r`Draft for legal
+- Confirmed: access 11-09 to 11-12; 182,400 customer records; 61,000 tickets; exfil evidence
+- Unknown: attacker identity; whether data has been published
+- Ongoing: ticket content analysis (ETA 11-14)`,
+        question: 'Why separate confirmed, unknown, and ongoing items?',
+        options: [
+          'To make the report longer',
+          'Decision makers need to know which facts are solid and which may change, so notifications are accurate and can be updated',
+          'Because regulators require three bullets',
+          'To hide information',
+        ],
+        correctIndex: 1,
+        hint: 'Accuracy beats speed in what you claim; speed matters for when you tell.',
+        walkthrough: 'GDPR allows phased notification. Clear labeling lets legal notify on time with confirmed facts and supplement later without contradicting earlier statements.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Support the notification',
+        evidence: r`Customer notice needs: what happened, data involved, what we are doing, what customers should do
+IR inputs needed: ?`,
+        question: 'Which IR inputs help customers protect themselves?',
+        options: [
+          'The names of analysts',
+          'The attacker\'s IP addresses',
+          'Internal server names',
+          'Which data types were exposed and practical steps, such as being alert to phishing that uses their ticket details',
+        ],
+        correctIndex: 3,
+        hint: 'What would a customer actually do?',
+        walkthrough: 'Customer notices should give actionable advice tied to the exposed data. Contact details and ticket history make targeted phishing likely, so warn customers about it.',
+      },
+    ],
+  },
+  {
+    id: 'lab-94',
+    title: 'Detecting Active Directory Mapping Tools',
+    domain: 2,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A domain controller\'s LDAP query volume spiked tenfold for twelve minutes, all from one workstation. No admin tools are approved on that host. Confirm whether an attacker ran an AD mapping collector and how to detect it reliably.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Look at the LDAP volume',
+        evidence: r`DC Directory Service log (Event 1644, expensive/inefficient searches)
+Client: 10.44.6.20   Filter: (objectClass=*)     Entries returned: 48,211
+Client: 10.44.6.20   Filter: (objectCategory=groupPolicyContainer)
+Client: 10.44.6.20   Filter: (|(samAccountType=805306368)(samAccountType=805306369)...)`,
+        question: 'What do these queries suggest?',
+        options: [
+          'A printer search',
+          'A normal user logon',
+          'A DNS update',
+          'Bulk enumeration of all users, computers, groups, and GPOs, which is typical of AD mapping tools like SharpHound',
+        ],
+        correctIndex: 3,
+        hint: 'What kind of client needs every object?',
+        walkthrough: 'Collectors query nearly the whole directory to build an attack graph. Event 1644 (when enabled) logs expensive or broad searches, a good detection source.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check session enumeration',
+        evidence: r`Zeek / Windows logs from 10.44.6.20
+SMB to 1,420 hosts in 9 minutes   named pipe: \srvsvc  operation: NetSessionEnum
+SMB to 1,420 hosts   named pipe: \samr  (local group enumeration)`,
+        question: 'Why does the tool contact so many hosts?',
+        options: [
+          'To deliver ransomware',
+          'To collect who is logged on where and local admin group membership, which reveals paths to privileged accounts',
+          'To patch systems',
+          'To scan for printers',
+        ],
+        correctIndex: 1,
+        hint: 'Sessions and local admins complete the graph.',
+        walkthrough: 'Mapping tools enumerate sessions and local groups across hosts to find where admins are logged in. A workstation touching over a thousand hosts\' srvsvc and samr pipes is highly anomalous.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Find the process',
+        evidence: r`EDR on 10.44.6.20
+powershell.exe -nop -w hidden -c "IEX ..."  (in-memory .NET assembly)
+Output file: C:\Users\Public\20261121_Bloodhound.zip`,
+        question: 'What is the significance of the zip file?',
+        options: [
+          'It is the collected AD data the attacker will exfiltrate and analyze to plan privilege escalation',
+          'A backup file',
+          'An installer',
+          'Nothing',
+        ],
+        correctIndex: 0,
+        hint: 'Collectors produce an archive of JSON files.',
+        walkthrough: 'The output archive contains the domain\'s relationships. Assume the attacker has a map of escalation paths and prioritize fixing the most dangerous ones.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Respond',
+        evidence: r`User on 10.44.6.20: c.wright (marketing)
+Recent sign-in from new device; mailbox has new forwarding rule`,
+        question: 'What does the extra context suggest?',
+        options: [
+          'The workstation should be rebooted',
+          'c.wright is a curious employee',
+          'The forwarding rule is unrelated',
+          'c.wright\'s account and workstation are compromised, so contain both and treat the AD data as exposed',
+        ],
+        correctIndex: 3,
+        hint: 'Several signs point to one compromised identity.',
+        walkthrough: 'A new device sign-in and mail forwarding alongside reconnaissance means the account is attacker-controlled. Contain the account and host, and review what else it touched.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Reduce the value of the map',
+        evidence: r`Hardening
+- Restrict NetSessionEnum to admins (NetCease-style registry change)
+- Limit SAMR remote calls (Network access: Restrict clients allowed to make remote calls to SAM)
+- Fix top attack paths shown by your own BloodHound run
+- Alert: one host making SMB connections to > 200 hosts in 10 minutes`,
+        question: 'Why run the mapping tool yourself?',
+        options: [
+          'It is not useful',
+          'To confuse attackers',
+          'To test DC performance',
+          'Defenders can see the same attack paths and remove them before attackers use them',
+        ],
+        correctIndex: 3,
+        hint: 'Use the attacker\'s view defensively.',
+        walkthrough: 'Running BloodHound defensively shows risky group memberships, sessions, and ACLs. Fixing the shortest paths to Domain Admin makes stolen maps far less useful.',
+      },
+    ],
+  },
+  {
+    id: 'lab-95',
+    title: 'Evil Twin Access Point in the Office',
+    domain: 2,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'The wireless intrusion prevention system (WIPS) reports an access point broadcasting the corporate SSID that is not managed by the controller. Several laptops connected to it and users saw unexpected login prompts. Investigate.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the WIPS alert',
+        evidence: r`WIPS alert: Rogue AP (SSID spoof)
+SSID: CorpWiFi   BSSID: 7a:2c:11:9f:30:01   Channel: 6   Security: WPA2-Personal
+Managed CorpWiFi: WPA2-Enterprise (802.1X)   Signal at floor 3 east: -38 dBm`,
+        question: 'What is the key mismatch?',
+        options: [
+          'The BSSID format',
+          'The channel number',
+          'The rogue AP uses a different security mode (WPA2-Personal) for the same SSID, which some clients may accept',
+          'Nothing, the AP is managed',
+        ],
+        correctIndex: 2,
+        hint: 'Same name, different security.',
+        walkthrough: 'Evil twins copy the SSID. Some clients configured loosely will connect to the same name with different security, or users will accept a prompt. A strong signal near users makes clients prefer it.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check what clients saw',
+        evidence: r`User report: "A pop-up asked me to re-enter my Windows password to reconnect to CorpWiFi."
+Laptop WLAN log: connected to BSSID 7a:2c:11:9f:30:01; captive page http://10.0.0.1/login`,
+        question: 'What is the attacker trying to collect?',
+        options: [
+          'Browser history',
+          'Wi-Fi performance data',
+          'MAC addresses only',
+          'Domain credentials through a fake captive portal',
+        ],
+        correctIndex: 3,
+        hint: 'Corporate Wi-Fi does not use a captive portal.',
+        walkthrough: 'A captive page asking for Windows credentials on a corporate SSID is phishing. Any user who entered their password must be treated as compromised.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Assess enterprise config risks',
+        evidence: r`GPO WLAN profile CorpWiFi
+Validate server certificate: disabled
+Connect to these servers: (blank)
+Prompt user to authorize new servers: enabled`,
+        question: 'Why are these profile settings dangerous?',
+        options: [
+          'Without certificate validation, clients can complete 802.1X with an attacker\'s RADIUS server and expose credential material',
+          'They improve security',
+          'They only affect guest Wi-Fi',
+          'They disable Wi-Fi',
+        ],
+        correctIndex: 0,
+        hint: 'Who are clients authenticating to?',
+        walkthrough: 'If the client does not validate the RADIUS server certificate, an evil twin running WPA2-Enterprise can capture authentication exchanges. Server validation with pinned server names is essential.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Locate and remove',
+        evidence: r`WIPS location estimate: floor 3 east, near conference room 3E-2
+Wired side: no switch port associated (AP not connected to LAN)`,
+        question: 'How should the team respond?',
+        options: [
+          'Ignore it since it is not on the LAN',
+          'Block the SSID on the controller',
+          'Rename the corporate SSID',
+          'Physically locate and seize the device as evidence, and use WIPS containment carefully where legal and approved',
+        ],
+        correctIndex: 3,
+        hint: 'Not on the LAN does not mean harmless.',
+        walkthrough: 'An evil twin does not need LAN access to steal credentials. Physical removal and evidence preservation are priorities. Wireless containment may have legal limits and should follow policy.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Recover and harden',
+        evidence: r`Users who connected to rogue BSSID: 14 (from WLAN logs)
+Plan: reset passwords for those 14; enforce server certificate validation; move to EAP-TLS`,
+        question: 'Why is EAP-TLS stronger than password-based 802.1X?',
+        options: [
+          'It hides the SSID',
+          'It is faster',
+          'It removes the need for RADIUS',
+          'It uses client certificates instead of passwords, so there is no reusable password for an evil twin to capture',
+        ],
+        correctIndex: 3,
+        hint: 'What can be stolen in each method?',
+        walkthrough: 'With EAP-TLS, both sides authenticate with certificates. An attacker cannot harvest a password, and proper server validation stops clients from trusting fake networks.',
+      },
+    ],
+  },
+  {
+    id: 'lab-96',
+    title: 'Leaked GCP Service Account Key',
+    domain: 3,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A JSON service account key for a Google Cloud project was found in a public Docker image layer. Cloud Audit Logs show API calls from an unknown IP. Contain the key, scope what it was used for, and move to safer authentication.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Identify the key',
+        evidence: r`Docker layer: /app/creds/gcp-sa.json
+{"type":"service_account","project_id":"acme-analytics","private_key_id":"a7f3...",
+ "client_email":"etl-runner@acme-analytics.iam.gserviceaccount.com", ...}`,
+        question: 'Why is a service account key file so sensitive?',
+        options: [
+          'It expires after one hour',
+          'It is a long-lived credential that lets anyone authenticate as the service account until the key is deleted',
+          'It only works inside Google Cloud',
+          'It is encrypted with the user\'s password',
+        ],
+        correctIndex: 1,
+        hint: 'User-managed keys do not expire by default.',
+        walkthrough: 'User-managed SA keys are bearer credentials usable from anywhere. Unless an expiry policy is set, they last until deleted. Baking them into images spreads them widely.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Review the permissions',
+        evidence: r`gcloud projects get-iam-policy acme-analytics --flatten="bindings[].members" --filter="bindings.members:etl-runner"
+roles/bigquery.admin
+roles/storage.objectAdmin
+roles/iam.serviceAccountTokenCreator`,
+        question: 'Which role increases the blast radius beyond data access?',
+        options: [
+          'BigQuery Admin',
+          'Service Account Token Creator, which can let the attacker impersonate other service accounts',
+          'Storage Object Admin',
+          'None',
+        ],
+        correctIndex: 1,
+        hint: 'Which role touches identity?',
+        walkthrough: 'Token Creator lets the holder mint tokens for other service accounts it is allowed on, a privilege escalation path. Data roles expose BigQuery and Storage.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Read the audit logs',
+        evidence: r`Cloud Audit Logs (principal etl-runner@..., callerIp 203.0.113.150)
+google.cloud.bigquery.v2.JobService.InsertJob  query: SELECT * FROM crm.customers  (1.1 GB)
+GenerateAccessToken  target: deploy-admin@acme-analytics.iam.gserviceaccount.com
+compute.instances.insert  (as deploy-admin)  n2-highcpu-32 x 8`,
+        question: 'What happened?',
+        options: [
+          'Only one query ran',
+          'The attacker read customer data, then impersonated a more privileged service account and launched compute instances',
+          'The ETL job ran normally',
+          'Nothing; the key failed',
+        ],
+        correctIndex: 1,
+        hint: 'Follow the identity change.',
+        walkthrough: 'The audit trail shows data theft, privilege escalation through impersonation, and resource abuse. The deploy-admin account is now also in scope.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: r`Steps
+- Disable and delete key a7f3... for etl-runner
+- Review deploy-admin: tokens are short-lived but check for new keys or IAM bindings it created
+- Stop and preserve the 8 instances
+- Remove the image from the public registry`,
+        question: 'Why check deploy-admin for new keys or IAM bindings?',
+        options: [
+          'To save money',
+          'Deploy-admin tokens never expire',
+          'The attacker could have used deploy-admin to create new persistent credentials that survive deleting the original key',
+          'To restart the ETL job',
+        ],
+        correctIndex: 2,
+        hint: 'Persistence through a second identity.',
+        walkthrough: 'Short-lived tokens expire, but an attacker can use them to create new keys, grant roles, or add accounts. Search audit logs for CreateServiceAccountKey and SetIamPolicy by both identities.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent recurrence',
+        evidence: r`Org policy and design
+- constraints/iam.disableServiceAccountKeyCreation (enforced)
+- Workload Identity Federation for external runners
+- Least privilege: remove Token Creator from etl-runner
+- Container image scanning for secrets before publish`,
+        question: 'What does disabling SA key creation force teams to do?',
+        options: [
+          'Store keys in Git',
+          'Share one key across projects',
+          'Use keyless methods such as attached service accounts or workload identity federation, which issue short-lived tokens',
+          'Use personal accounts',
+        ],
+        correctIndex: 2,
+        hint: 'No keys, nothing to leak.',
+        walkthrough: 'With key creation blocked, workloads use identity federation or attached identities. There is no long-lived secret to put into images, eliminating this class of leak.',
+      },
+    ],
+  },
+  {
+    id: 'lab-97',
+    title: 'Unconstrained Delegation and Coerced Authentication',
+    domain: 3,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'An AD security assessment found a legacy application server with unconstrained Kerberos delegation. Now the SOC sees the domain controller\'s machine account authenticating to that server at 3 AM. Determine what this means and fix the configuration.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Identify the risky setting',
+        evidence: r`Get-ADComputer -Filter {TrustedForDelegation -eq $true} -Properties TrustedForDelegation | Select Name
+Name
+DC01
+DC02
+APP-LEGACY01`,
+        question: 'Why is APP-LEGACY01 in this list a concern?',
+        options: [
+          'It means the server is a domain controller',
+          'Any account that authenticates to it with Kerberos sends a forwardable TGT that the server stores, so whoever controls the server can reuse those tickets',
+          'It speeds up logons',
+          'It disables Kerberos',
+        ],
+        correctIndex: 1,
+        hint: 'DCs are expected in this list; application servers are not.',
+        walkthrough: 'With unconstrained delegation, the server receives users\' TGTs. If an attacker controls the server, they can extract and reuse tickets of anyone who connects, including privileged accounts.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Read the 3 AM event',
+        evidence: r`APP-LEGACY01 Security log 4624
+LogonType: 3   Account: DC01$   AuthPackage: Kerberos   Source: 10.0.0.10 (DC01)
+Preceded by: RPC call from 10.44.9.71 to DC01 (MS-RPRN / print spooler interface) at 02:59:58`,
+        question: 'What does the print spooler RPC call suggest?',
+        options: [
+          'An attacker coerced DC01 into authenticating to the delegation server, so the DC\'s TGT could be captured there',
+          'A user printed a document',
+          'The DC rebooted',
+          'A backup job',
+        ],
+        correctIndex: 0,
+        hint: 'Why would a DC authenticate to an app server at 3 AM?',
+        walkthrough: 'Coercion techniques use RPC interfaces such as the print spooler or EFSRPC to make a DC connect to an attacker-chosen host. Combined with unconstrained delegation, the DC\'s TGT lands on the server.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Assess the impact',
+        evidence: r`APP-LEGACY01: EDR shows LSASS access by unknown process at 03:00:04
+DC01 4662: DS-Replication-Get-Changes-All requested by DC01$ from 10.44.9.71 at 03:01`,
+        question: 'What does the replication request from a non-DC IP mean?',
+        options: [
+          'The attacker used the DC\'s identity to request directory replication (DCSync), likely obtaining all password hashes including krbtgt',
+          'Normal DC replication',
+          'A failed logon',
+          'A GPO update',
+        ],
+        correctIndex: 0,
+        hint: 'Replication should only come from DCs.',
+        walkthrough: 'Replication rights used from a workstation IP indicate DCSync. With the krbtgt hash, the attacker can forge tickets. This is a full domain compromise.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Plan recovery',
+        evidence: r`Recovery actions
+- Isolate 10.44.9.71 and APP-LEGACY01
+- Reset krbtgt twice (with replication time between)
+- Reset privileged and service account passwords
+- Hunt for forged tickets and new persistence`,
+        question: 'Why reset krbtgt twice?',
+        options: [
+          'To change the domain name',
+          'Once is not allowed',
+          'To reset both DCs',
+          'Kerberos keeps the previous key valid, so two resets are needed to invalidate tickets signed with the stolen key',
+        ],
+        correctIndex: 3,
+        hint: 'The current and previous keys are both accepted.',
+        walkthrough: 'Domain controllers accept tickets signed with the current or previous krbtgt key. Resetting twice, with time for replication in between, removes the stolen key from both slots.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the configuration',
+        evidence: r`Hardening
+- Remove unconstrained delegation from APP-LEGACY01 (use constrained or resource-based)
+- Add privileged accounts to Protected Users / mark "sensitive and cannot be delegated"
+- Disable Print Spooler on DCs
+- Alert on 4662 replication rights from non-DC sources`,
+        question: 'How does disabling the Print Spooler on DCs help?',
+        options: [
+          'It patches Kerberos',
+          'It speeds up printing',
+          'It removes a common coercion interface, so attackers cannot easily force DCs to authenticate to arbitrary hosts',
+          'It removes delegation',
+        ],
+        correctIndex: 2,
+        hint: 'DCs rarely need to print.',
+        walkthrough: 'Removing unconstrained delegation stops ticket capture. Disabling spooler on DCs and applying patches for other coercion methods reduces the ways to trigger authentication. Detection on DCSync catches what remains.',
+      },
+    ],
+  },
+  {
+    id: 'lab-98',
+    title: 'HTTP Request Smuggling Between Proxy and App',
+    domain: 4,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'Users report occasionally landing on someone else\'s account page, and a WAF bypass let an attacker reach /admin. The architecture is a front-end load balancer forwarding to a back-end app server over a reused connection. Investigate desync between them.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Spot the conflicting headers',
+        evidence: r`Raw request captured at load balancer
+POST / HTTP/1.1
+Host: app.corp.example
+Content-Length: 44
+Transfer-Encoding: chunked
+
+0
+
+GET /admin HTTP/1.1
+Host: app.corp.example`,
+        question: 'Why is a request with both Content-Length and Transfer-Encoding dangerous?',
+        options: [
+          'If the front end and back end use different headers to find the end of the request, extra bytes become the start of the next request on the shared connection',
+          'It is always rejected by HTTP/1.1',
+          'It doubles the request speed',
+          'It only affects images',
+        ],
+        correctIndex: 0,
+        hint: 'Who decides where the request ends?',
+        walkthrough: 'HTTP request smuggling exploits disagreement over request boundaries. One server uses Content-Length, the other chunked encoding. The leftover GET /admin gets glued to the next user\'s request.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Confirm the desync',
+        evidence: r`LB config: honors Content-Length when both present
+App server (legacy): honors Transfer-Encoding: chunked
+App access log: GET /admin 200 from LB internal IP (no WAF log entry)`,
+        question: 'Why did the WAF miss the admin request?',
+        options: [
+          'The WAF was disabled',
+          'The WAF at the front end saw only one POST to /; the smuggled GET was parsed as a separate request only by the back end',
+          'The admin page is public',
+          'The request used HTTPS',
+        ],
+        correctIndex: 1,
+        hint: 'The two parsers saw different requests.',
+        walkthrough: 'Security controls on the front end evaluate what they parse. The hidden request bypassed routing rules and the WAF because only the back end saw it.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Explain the account mix-up',
+        evidence: r`App log
+user=4471 GET /account  -> response delivered to client connection of user=5120`,
+        question: 'What causes users to see other accounts\' pages?',
+        options: [
+          'Browser bugs',
+          'Session cookies are shared',
+          'Caching of all pages',
+          'Desync shifts responses on the shared connection, so one user\'s response can be delivered to another user\'s request',
+        ],
+        correctIndex: 3,
+        hint: 'Responses are matched to requests in order.',
+        walkthrough: 'When the back end sees an extra request, response order shifts. The front end then returns responses to the wrong clients, exposing private data.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: r`Options
+A) Normalize: LB rejects requests with both CL and TE, or with malformed TE
+B) Disable back-end connection reuse temporarily
+C) Upgrade back end to a version that rejects ambiguous requests`,
+        question: 'Which immediate step stops exploitation fastest?',
+        options: [
+          'C only, scheduled for next quarter',
+          'A, rejecting ambiguous requests at the front end, with B as an extra temporary measure',
+          'Block /admin by IP',
+          'Restart the app',
+        ],
+        correctIndex: 1,
+        hint: 'Stop ambiguous requests at the edge.',
+        walkthrough: 'Front-end normalization removes the ambiguity. Disabling connection reuse limits cross-user impact. Upgrading and using HTTP/2 end to end are longer-term fixes.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent the class',
+        evidence: r`Long-term
+- Use HTTP/2 to the back end where supported
+- Ensure front and back end use the same parser rules
+- Monitor for 400s on malformed TE and unusual request bursts`,
+        question: 'Why does using HTTP/2 between proxy and back end help?',
+        options: [
+          'HTTP/2 frames define message length clearly, removing the CL vs TE ambiguity on that hop',
+          'It encrypts traffic',
+          'It disables chunked encoding everywhere on the internet',
+          'It makes requests smaller',
+        ],
+        correctIndex: 0,
+        hint: 'Binary framing has no competing length headers.',
+        walkthrough: 'HTTP/2 framing marks message boundaries. Downgrading to HTTP/1.1 on the back end reintroduces risk, so keep it end to end or ensure strict parsing.',
+      },
+    ],
+  },
+  {
+    id: 'lab-99',
+    title: 'Overly Permissive CORS on an API',
+    domain: 4,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'A security researcher showed that a malicious website could read a logged-in user\'s account data from your API. The API sets CORS headers dynamically. Investigate the configuration and fix it.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Test the response',
+        evidence: r`curl -s -I https://api.corp.example/v1/me -H "Origin: https://evil.example" -H "Cookie: session=..."
+HTTP/2 200
+access-control-allow-origin: https://evil.example
+access-control-allow-credentials: true`,
+        question: 'What is wrong?',
+        options: [
+          'Nothing, CORS is working',
+          'The API reflects any Origin and allows credentials, so any website can make authenticated requests and read the responses',
+          'The API uses HTTP/2',
+          'The session cookie is missing',
+        ],
+        correctIndex: 1,
+        hint: 'Reflecting arbitrary origins with credentials.',
+        walkthrough: 'CORS lets the server tell browsers which origins can read responses. Reflecting any Origin together with Allow-Credentials gives every website access to the user\'s data.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find the code',
+        evidence: r`app.use((req, res, next) => {
+  res.set('Access-Control-Allow-Origin', req.headers.origin);
+  res.set('Access-Control-Allow-Credentials', 'true');
+  next();
+});`,
+        question: 'Why did developers likely write it this way?',
+        options: [
+          'To make cross-origin requests work for several front ends quickly, without maintaining an allowlist',
+          'To improve security',
+          'Because browsers require it',
+          'To block bots',
+        ],
+        correctIndex: 0,
+        hint: 'A quick fix for CORS errors.',
+        walkthrough: 'Reflecting the Origin header silences CORS errors in development. Shipped to production, it removes the browser\'s same-origin protection for this API.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Assess exposure',
+        evidence: r`/v1/me returns: name, email, address, API tokens list
+Access logs: Origin values on /v1/me (30 days): app.corp.example, admin.corp.example, 3 unknown domains`,
+        question: 'What do the unknown origins mean?',
+        options: [
+          'Nothing; browsers ignore CORS',
+          'They are search engine crawlers',
+          'Other websites may have read users\' data, so investigate those domains and the sessions involved',
+          'They are typos',
+        ],
+        correctIndex: 2,
+        hint: 'Origin is set by browsers to the calling page.',
+        walkthrough: 'An unknown Origin on authenticated requests means a third-party page triggered them in a user\'s browser. The returned data, including tokens, may have been captured.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: r`Response includes users' personal API tokens.
+Unique users with requests from unknown origins: 88`,
+        question: 'What should be done for those 88 users?',
+        options: [
+          'Revoke and reissue their API tokens and notify them, after fixing the CORS policy',
+          'Nothing, tokens are safe',
+          'Delete their accounts',
+          'Change the API domain',
+        ],
+        correctIndex: 0,
+        hint: 'Tokens may have been read.',
+        walkthrough: 'Tokens visible to attacker pages must be revoked. Fix the policy first so reissued tokens are not exposed again.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the policy',
+        evidence: r`const allowed = new Set(['https://app.corp.example','https://admin.corp.example']);
+if (allowed.has(req.headers.origin)) { res.set('Access-Control-Allow-Origin', req.headers.origin); res.set('Vary','Origin'); }`,
+        question: 'Why add Vary: Origin?',
+        options: [
+          'It is required for HTTP/2',
+          'To compress responses',
+          'To enable cookies',
+          'So caches do not serve a response with one origin\'s CORS header to a request from a different origin',
+        ],
+        correctIndex: 3,
+        hint: 'Responses differ by Origin.',
+        walkthrough: 'An exact allowlist only grants access to trusted front ends. Vary: Origin tells caches that the response depends on the Origin header. Avoid regex patterns that can be bypassed with lookalike domains.',
+      },
+    ],
+  },
+  {
+    id: 'lab-100',
+    title: 'Office Add-in and Template Persistence',
+    domain: 5,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'After a phishing incident was cleaned up, the same user\'s laptop reconnected to the attacker every time they opened Excel or Word. Startup folders and Run keys are clean. Investigate Office-specific persistence.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Check Excel add-ins',
+        evidence: r`reg query HKCU\Software\Microsoft\Office\16.0\Excel\Options
+    OPEN    REG_SZ    /R "C:\Users\l.moreau\AppData\Roaming\Microsoft\AddIns\analysis_tools.xll"`,
+        question: 'What does this value do?',
+        options: [
+          'It loads an XLL add-in, a native DLL, every time Excel starts',
+          'It opens a recent workbook',
+          'It sets Excel\'s theme',
+          'It disables macros',
+        ],
+        correctIndex: 0,
+        hint: 'XLL files are DLLs that Excel loads.',
+        walkthrough: 'The OPEN values under Excel options auto-load add-ins. XLLs run native code in Excel, so this gives code execution on every launch without macros.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check the Word template',
+        evidence: r`Get-FileHash $env:APPDATA\Microsoft\Templates\Normal.dotm
+Modified: 2026-11-08 14:03 (phishing date)   Size: 48 KB (typical default ~20 KB)
+olevba Normal.dotm -> AutoExec macro: Shell "rundll32 C:\Users\Public\o.dll,Start"`,
+        question: 'Why is Normal.dotm a good persistence spot?',
+        options: [
+          'Word loads it every time it starts, so an AutoExec macro in it runs on each launch',
+          'It is only used for printing',
+          'It is read-only',
+          'It is never loaded',
+        ],
+        correctIndex: 0,
+        hint: 'Every new document is based on it.',
+        walkthrough: 'Normal.dotm is the global template. Macros like AutoExec run when Word starts. Trusted location rules often allow it to run even when other macros are blocked.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Check COM add-ins',
+        evidence: r`HKCU\Software\Microsoft\Office\Outlook\Addins\OutlookSyncHelper.Connect
+    LoadBehavior    REG_DWORD    3
+    FriendlyName    Outlook Sync Helper
+HKCU\Software\Classes\CLSID\{...}\InprocServer32  -> C:\Users\l.moreau\AppData\Local\osh\osh.dll`,
+        question: 'What does LoadBehavior 3 mean?',
+        options: [
+          'The add-in loads automatically when Outlook starts',
+          'The add-in is disabled',
+          'It loads only on demand',
+          'It is a system add-in',
+        ],
+        correctIndex: 0,
+        hint: '3 = load at startup.',
+        walkthrough: 'COM add-ins registered under HKCU need no admin rights. LoadBehavior 3 makes them load at startup, running the attacker\'s DLL inside Outlook.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Eradicate',
+        evidence: 'Found: analysis_tools.xll, modified Normal.dotm, OutlookSyncHelper COM add-in, o.dll, osh.dll',
+        question: 'What is a safe cleanup approach?',
+        options: [
+          'Reinstall Office only',
+          'Delete only Normal.dotm',
+          'Remove all three persistence entries and files, replace Normal.dotm with a clean default, then check other user-level persistence and the user\'s credentials',
+          'Block Excel',
+        ],
+        correctIndex: 2,
+        hint: 'Reinstalling Office often keeps user profile settings.',
+        walkthrough: 'User-profile persistence survives Office reinstalls. Remove each entry, replace the template, and check other Office apps and locations. Assume credentials used on the host were exposed.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Harden Office',
+        evidence: r`Policy options
+- Block macros from the internet; disable VBA for users who do not need it
+- Require add-ins to be signed by trusted publishers; block XLL from untrusted sources
+- ASR: Block Office apps from injecting code / creating executables
+- Monitor HKCU Office Addins and Options OPEN values`,
+        question: 'Which control addresses the XLL technique specifically?',
+        options: [
+          'Requiring add-ins to be signed by trusted publishers and blocking untrusted XLLs',
+          'Blocking internet macros',
+          'Disabling VBA',
+          'Replacing Normal.dotm',
+        ],
+        correctIndex: 0,
+        hint: 'XLLs are not VBA macros.',
+        walkthrough: 'Macro policies do not cover XLLs. Microsoft now blocks XLLs from the internet by default, and requiring signed add-ins prevents unknown ones from loading. Registry monitoring detects new add-in entries.',
+      },
+    ],
+  },
+  {
+    id: 'lab-101',
+    title: 'Detecting a Loadable Kernel Module Rootkit',
+    domain: 5,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'A Linux database server shows high CPU, but top and ps show nothing unusual. Network monitoring sees outbound traffic the host does not account for. You suspect a kernel rootkit is hiding processes and connections.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Compare views of processes',
+        evidence: r`$ ps -e | wc -l
+182
+$ ls -d /proc/[0-9]* | wc -l
+182
+$ for p in $(seq 1 65535); do [ -d /proc/$p ] && echo $p; done | wc -l   (brute-force check)
+183`,
+        question: 'What does the mismatch suggest?',
+        options: [
+          'ps is broken',
+          'The system is healthy',
+          'One process is hidden from directory listing but still reachable by its PID, a sign of a rootkit hooking directory reads',
+          'A process ended between commands',
+        ],
+        correctIndex: 2,
+        hint: 'Listing and direct access give different answers.',
+        walkthrough: 'Rootkits often hide entries from directory listings by hooking getdents. Probing PIDs directly can reveal the hidden process. Unhide-style tools automate this comparison.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check loaded modules',
+        evidence: r`$ lsmod | grep -c .
+71
+$ ls /sys/module | wc -l
+73
+$ dmesg | grep -i taint
+[  210.11] module_x: loading out-of-tree module taints kernel.
+[  210.11] module_x: module verification failed: signature and/or required key missing`,
+        question: 'What do these results indicate?',
+        options: [
+          'The kernel is not tainted',
+          'All modules are signed',
+          'An unsigned out-of-tree module was loaded, and it is hiding itself from lsmod while still leaving traces in /sys and the kernel log',
+          'dmesg only shows hardware errors',
+        ],
+        correctIndex: 2,
+        hint: 'Taint messages and counts differ.',
+        walkthrough: 'A module that hides from /proc/modules may still leave sysfs entries. Taint messages show an unsigned module was loaded. Both are strong signs of an LKM rootkit.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Confirm from outside',
+        evidence: r`Network tap (Zeek)
+db-prod03 -> 198.51.100.200:443  long-lived, 300 MB out
+On host: ss -tanp | grep 198.51.100.200   (no output)`,
+        question: 'Why is the network view trustworthy here?',
+        options: [
+          'Zeek runs on the same kernel',
+          'The rootkit controls what the host reports, but it cannot hide packets already seen by an external sensor',
+          'ss is always more accurate',
+          'The connection is fake',
+        ],
+        correctIndex: 1,
+        hint: 'Where does the evidence come from?',
+        walkthrough: 'A compromised kernel can lie to any tool on the host. Off-host evidence like network taps and hypervisor memory snapshots gives a trustworthy view.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Collect memory safely',
+        evidence: r`Options
+A) Run a memory acquisition module on the live host (LiME)
+B) Snapshot the VM memory from the hypervisor
+C) Reboot and image the disk`,
+        question: 'Which option is best for this VM?',
+        options: [
+          'B, a hypervisor memory snapshot, which avoids depending on the compromised kernel',
+          'C, because reboot clears the rootkit',
+          'A, which is always preferred',
+          'None, memory is not useful',
+        ],
+        correctIndex: 0,
+        hint: 'Avoid trusting the infected kernel.',
+        walkthrough: 'Hypervisor snapshots capture memory without running tools inside the guest. Memory analysis (e.g., Volatility linux plugins for hidden modules and syscall hooks) can then reveal the rootkit. Rebooting destroys volatile evidence.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Recover and prevent',
+        evidence: r`Plan
+- Rebuild db-prod03 from trusted image; restore data only
+- Rotate DB and OS credentials
+- Enable Secure Boot with kernel module signature enforcement (module.sig_enforce=1)
+- Restrict module loading after boot (kernel.modules_disabled=1 where feasible)`,
+        question: 'Why rebuild rather than remove the module?',
+        options: [
+          'Rebuilding is faster than rmmod',
+          'Modules cannot be removed',
+          'A kernel-level compromise means no tool on the host can be trusted to confirm it is clean',
+          'To upgrade the database',
+        ],
+        correctIndex: 2,
+        hint: 'Trust is lost at the kernel level.',
+        walkthrough: 'Once the kernel is compromised, you cannot reliably verify a cleanup. Rebuild from known-good media. Signature enforcement and disabling module loading make LKM rootkits much harder to install.',
+      },
+    ],
+  },
 ];
