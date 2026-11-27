@@ -2589,4 +2589,614 @@ Get-CimInstance -Namespace root/subscription -ClassName __FilterToConsumerBindin
       },
     ],
   },
+  {
+    id: 'lab-25',
+    title: 'Golden Ticket After a Domain Compromise',
+    domain: 3,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'Two weeks ago Corp recovered from a ransomware intrusion and reset every user password. Today, Defender for Identity raised "Suspected Golden Ticket usage (encryption downgrade)" for the account "Administrator" on workstation LAB-WS03. The krbtgt account was not reset during recovery. Confirm the activity and plan a safe response.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Examine the ticket anomaly',
+        evidence: r`DC01 Security log (filtered: Client 10.20.14.9 = LAB-WS03)
+09:12:41  4769  Account: Administrator@CORP.LOCAL  Service: cifs/FS01  Ticket Encryption: 0x17
+09:12:41  (no 4768 TGT request for Administrator from 10.20.14.9 in the last 10 days)
+Domain policy: AES-only; normal tickets 0x12
+Administrator account: disabled since 2025-12 (break-glass replaced it)`,
+        question: 'Why does this point to a forged TGT?',
+        options: [
+          'Service tickets are always suspicious',
+          'A service ticket was requested with a TGT the DC never issued (no 4768), for a disabled account, using RC4 in an AES-only domain, which fits a ticket forged offline with the krbtgt key',
+          'The workstation clock is wrong',
+          'The Administrator account was re-enabled by IT',
+        ],
+        correctIndex: 1,
+        hint: 'Normally a 4768 (TGT issued) precedes 4769 for the same client. What else is unusual?',
+        walkthrough: 'A golden ticket is a TGT forged with the krbtgt secret, so the DC never logs issuing it. Forgery tools often default to RC4 and can name any account, even a disabled one, because the DC trusts anything signed with the krbtgt key for the ticket lifetime. Three anomalies together make this high confidence.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Explain why the earlier recovery missed this',
+        evidence: r`Recovery checklist from the ransomware incident:
+[x] Reset all user passwords
+[x] Reset all service account passwords
+[x] Rebuild domain controllers from backup taken during the compromise window
+[ ] Reset krbtgt (deferred: "risk of breaking authentication")
+DCSync evidence during the original incident: 4662 replication from 10.20.4.22 on 02-27`,
+        question: 'Why did resetting all user passwords not stop the attacker?',
+        options: [
+          'The attacker stole the krbtgt secret via DCSync during the original incident; since krbtgt was never reset, they can still forge TGTs for any account regardless of user passwords',
+          'Users chose weak new passwords',
+          'Password resets take 30 days to apply',
+          'Golden tickets use smart cards',
+        ],
+        correctIndex: 0,
+        hint: 'Which account\'s secret signs every TGT in the domain?',
+        walkthrough: 'DCSync during the first incident exposed the krbtgt hash. Golden tickets do not depend on the impersonated user\'s password, so user resets do nothing. Restoring DCs from a backup taken during the compromise window also preserved that same krbtgt key.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Find what the forged ticket was used for',
+        evidence: r`FS01 Security log
+09:12:42  4624  Logon Type 3  Account: Administrator  Source: 10.20.14.9  Auth: Kerberos
+09:12:44  5145  \\*\Finance  ReadData  (2,418 files)
+LAB-WS03 EDR
+09:10:02  rundll32.exe (no args) -> 185.174.100.3:443
+Owner of LAB-WS03: shared training-lab PC, rarely monitored`,
+        question: 'What is the scope so far?',
+        options: [
+          'Only a failed login',
+          'Only LAB-WS03 is affected and no data was accessed',
+          'A legitimate admin session',
+          'An implant on LAB-WS03 used the forged ticket to read about 2,400 Finance files on FS01, and is beaconing to an external IP',
+        ],
+        correctIndex: 3,
+        hint: 'Follow the ticket to FS01, and check what the workstation itself is doing.',
+        walkthrough: 'The forged ticket gave domain-admin-level access to FS01, and the Finance share was read in bulk. LAB-WS03, an unmonitored lab PC, hosts the beacon. The attacker returned through a host that was missed in the first eradication.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Plan the krbtgt reset safely',
+        evidence: r`Domain: 6 DCs across 3 sites, AD replication interval up to 60 min
+Max TGT lifetime: 10 hours; max renewal: 7 days
+Microsoft guidance: reset krbtgt, wait for replication and ticket lifetime, then reset again`,
+        question: 'Which reset plan is correct?',
+        options: [
+          'Reset krbtgt once and finish',
+          'Contain LAB-WS03 first, reset krbtgt once, confirm replication to all DCs and wait at least the max TGT lifetime (10h), then reset a second time, monitoring for authentication errors and golden-ticket alerts',
+          'Reset it twice back to back within one minute',
+          'Delete the krbtgt account',
+        ],
+        correctIndex: 1,
+        hint: 'The DC accepts the current and the previous krbtgt key.',
+        walkthrough: 'One reset leaves the stolen key valid as the "previous" key. Two quick resets can break legitimate tickets and replication. The safe pattern is reset, wait for replication and ticket lifetime, reset again. Containing the beacon first stops the attacker from re-establishing access in between.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Close the remaining gaps',
+        evidence: r`Gaps found:
+- DCs restored from a backup inside the compromise window
+- LAB-WS03 and 40 other lab PCs had no EDR
+- No alert on 4769 without prior 4768 or on RC4 tickets
+- Accounts with replication rights: Domain Admins, Enterprise Admins, svc_aadsync, and "old_backup_svc"`,
+        question: 'Which actions address these gaps?',
+        options: [
+          'Only deploy EDR',
+          'Deploy EDR to all lab PCs, sweep them for the beacon, remove replication rights from old_backup_svc, add golden-ticket and RC4 detections, and revalidate DC integrity since they came from a compromise-era backup',
+          'Disable Kerberos',
+          'Rebuild every workstation in the company',
+        ],
+        correctIndex: 1,
+        hint: 'Visibility, privilege, detection, and DC trustworthiness.',
+        walkthrough: 'Unmonitored hosts let the attacker return, stale accounts with replication rights enable future DCSync, and detections on ticket anomalies would have caught this sooner. DCs restored from a compromise-era backup should be checked for persistence (e.g., rogue accounts, GPOs, AdminSDHolder changes).',
+      },
+    ],
+  },
+  {
+    id: 'lab-26',
+    title: 'AWS Privilege Escalation Through PassRole',
+    domain: 3,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A developer\'s access key (user dev-anna) was exposed in a CI log. The account team says dev-anna has "limited" permissions: she can only manage Lambda functions. Yet GuardDuty now shows an admin-level role being used from an unusual IP. Determine how a limited key became admin access.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review dev-anna\'s permissions',
+        evidence: r`$ aws iam list-attached-user-policies --user-name dev-anna
+PolicyName: LambdaDeveloper
+$ aws iam get-policy-version --policy-arn arn:aws:iam::111122223333:policy/LambdaDeveloper --version-id v3
+"Action": ["lambda:*", "iam:PassRole", "iam:ListRoles"], "Resource": "*"`,
+        question: 'Which permission makes this policy dangerous?',
+        options: [
+          'iam:ListRoles',
+          'lambda:* alone',
+          'iam:PassRole on all resources, combined with lambda:*, lets the user create a function that runs as any role in the account, including admin roles',
+          'None; the policy is limited to Lambda',
+        ],
+        correctIndex: 2,
+        hint: 'What does a Lambda function run as?',
+        walkthrough: 'A Lambda function executes with the role assigned to it. If a user can pass any role (Resource "*") and create functions, they can borrow the permissions of the most powerful role. PassRole should be restricted to specific role ARNs.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Trace the escalation in CloudTrail',
+        evidence: r`userIdentity: dev-anna  sourceIP: 95.214.27.8
+07:40:11  ListRoles
+07:41:02  CreateFunction  functionName=log-rotate-helper  role=arn:aws:iam::111122223333:role/OrgAdminRole
+07:41:30  Invoke          functionName=log-rotate-helper
+userIdentity: assumed-role/OrgAdminRole/log-rotate-helper  sourceIP: (Lambda)
+07:41:33  CreateAccessKey userName=breakglass-admin`,
+        question: 'What did the attacker accomplish?',
+        options: [
+          'Nothing; Lambda cannot call IAM',
+          'Only listed roles',
+          'Created a Lambda function running as OrgAdminRole and used it to create a new access key for the break-glass admin user, turning a Lambda-only key into full admin access',
+          'Deleted dev-anna',
+        ],
+        correctIndex: 2,
+        hint: 'Follow the identity change from dev-anna to the assumed role.',
+        walkthrough: 'The function ran as OrgAdminRole, so its code could call IAM. Creating a key for breakglass-admin gives durable, high-privilege access outside the Lambda. This is a well-known escalation path that tools like Pacu and PMapper look for.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Find what the new key did',
+        evidence: r`userIdentity: breakglass-admin  accessKeyId: AKIA9ZZTEXAMPLE1Q2W  sourceIP: 95.214.27.8
+07:45:10  CreateLoginProfile userName=breakglass-admin
+07:46:02  ConsoleLogin (MFA: No)
+07:50:44  kms:ScheduleKeyDeletion keyId=prod-db-key  pendingWindowInDays=7
+07:51:20  rds:DeleteDBSnapshot x 14`,
+        question: 'What is the most urgent risk?',
+        options: [
+          'The console login',
+          'Destructive activity: the production database encryption key is scheduled for deletion and snapshots were deleted, which looks like preparation for extortion or sabotage',
+          'The login profile creation',
+          'Nothing urgent; the key deletion takes 7 days',
+        ],
+        correctIndex: 1,
+        hint: 'What happens to encrypted data if its KMS key is deleted?',
+        walkthrough: 'Deleting a KMS key makes all data encrypted with it unrecoverable. Combined with snapshot deletion, the attacker is destroying recovery options. The 7-day pending window is your chance: cancel the deletion immediately (kms:CancelKeyDeletion).',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain in the right order',
+        evidence: r`Actions:
+ a) kms cancel-key-deletion for prod-db-key
+ b) Deactivate dev-anna key and breakglass-admin key; delete breakglass-admin login profile
+ c) Revoke OrgAdminRole sessions (TokenIssueTime deny) and delete log-rotate-helper
+ d) Check for remaining snapshots and AWS Backup vault copies`,
+        question: 'Which order is best?',
+        options: [
+          'd, then b, then a, then c',
+          'c only',
+          'a and b immediately (stop the destructive change and cut access), then c, then d',
+          'Wait for the 7-day window to end',
+        ],
+        correctIndex: 2,
+        hint: 'Protect the data first, then remove access, then clean up and assess recovery.',
+        walkthrough: 'Cancel the key deletion and cut every attacker credential right away. Then revoke role sessions and remove the escalation function, and finally confirm what backups remain (AWS Backup vaults with vault lock, cross-account copies). Delaying any of the first steps risks permanent data loss.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent recurrence',
+        evidence: r`Findings:
+- PassRole granted on "*" to developers
+- OrgAdminRole trust policy allows lambda.amazonaws.com
+- Break-glass user had no MFA and no alerting
+- No SCP protecting KMS keys or backups`,
+        question: 'Which changes address these findings?',
+        options: [
+          'Scope iam:PassRole to specific roles, remove the Lambda trust from admin roles, require MFA and alert on any break-glass use, and add SCPs that deny KMS key deletion and backup deletion except from a protected role',
+          'Remove Lambda from the account',
+          'Rotate dev-anna\'s key only',
+          'Enable GuardDuty',
+        ],
+        correctIndex: 0,
+        hint: 'Close the escalation path and protect the destructive actions.',
+        walkthrough: 'Restricted PassRole and narrow role trust policies remove the escalation path. Break-glass accounts need MFA and alerts on every use. SCP guardrails on key and backup deletion make sabotage much harder even with admin credentials. GuardDuty was already on and helped detect this.',
+      },
+    ],
+  },
+  {
+    id: 'lab-27',
+    title: 'Running a Major Incident with PICERL',
+    domain: 1,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'You are the incident commander for a suspected breach of the customer loyalty platform. Several teams are involved and executives want updates every hour. This lab is about decisions, not tools: at each stage, choose the action that fits the PICERL phase you are in.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Identification: confirm the incident',
+        evidence: r`09:05 Customer support: 6 complaints of loyalty points disappearing
+09:20 App logs: 1,240 point transfers to 3 accounts between 02:00 and 04:00
+09:22 All transfers from sessions with IPs in one hosting provider, accounts created last week
+09:30 Fraud team: no planned promotions or migrations`,
+        question: 'What is the right decision at 09:30?',
+        options: [
+          'Declare an incident, assign roles (commander, lead investigator, comms, scribe), open a case record, and set a communication cadence',
+          'Wait for more complaints before acting',
+          'Restore the database from backup',
+          'Shut down the loyalty platform immediately',
+        ],
+        correctIndex: 0,
+        hint: 'The evidence already shows policy-violating activity. What does Identification end with?',
+        walkthrough: 'Multiple independent sources confirm unauthorized activity, so declare the incident. Assigning roles and a scribe early prevents chaos, and a fixed update cadence keeps executives from interrupting responders. Restoring or shutting down comes later, based on scope.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Containment: stop the damage',
+        evidence: r`09:45 Investigation: attacker logs in with stolen customer credentials (credential stuffing), then transfers points
+Options:
+ a) Freeze the 3 receiving accounts
+ b) Temporarily disable point transfers platform-wide
+ c) Force password resets for all 2.1 million customers right now
+ d) Take the entire platform offline`,
+        question: 'Which containment is proportionate?',
+        options: [
+          'a and b: freeze the receiving accounts and pause the transfer feature while the login issue is addressed',
+          'd only',
+          'c only',
+          'None; contain after eradication',
+        ],
+        correctIndex: 0,
+        hint: 'Stop the specific harmful action with minimal disruption.',
+        walkthrough: 'Freezing the receivers stops the loss and preserves evidence, and pausing transfers blocks the abuse path while customers can still use everything else. A mass password reset is disruptive and belongs to a planned eradication step; taking the whole platform offline is out of proportion.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Eradication: remove the cause',
+        evidence: r`Login logs: 4.8 million attempts in 3 days from 9,000 IPs; 3,140 successful logins on accounts that later had transfers
+No MFA on customer accounts; no bot protection on login
+Code review: transfer API allowed unlimited transfers without re-authentication`,
+        question: 'What should eradication include?',
+        options: [
+          'Block the 9,000 IPs and finish',
+          'Reset passwords for the 3,140 affected accounts, add bot protection and rate limits on login, require step-up verification for transfers, and fix the transfer API limits',
+          'Delete all customer accounts created last week',
+          'Rebuild all servers',
+        ],
+        correctIndex: 1,
+        hint: 'Address the stolen credentials, the stuffing technique, and the business-logic weakness.',
+        walkthrough: 'Eradication targets root causes: compromised accounts, the unprotected login (bot defense, rate limits, MFA options), and the transfer feature that let attackers move value without extra checks. IP blocks are temporary, since attackers rotate. There is no evidence of server compromise that would justify rebuilding.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Recovery: return to normal',
+        evidence: r`Fixes deployed and tested in staging
+Fraud team can restore points from the transaction log
+Business wants transfers back on before the weekend campaign`,
+        question: 'How should transfers be brought back?',
+        options: [
+          'Restore affected customers\' points, re-enable transfers in stages with the new controls, and monitor closely with alerts on transfer spikes and login anomalies',
+          'Re-enable everything at once and stop monitoring',
+          'Keep transfers disabled permanently',
+          'Re-enable transfers without the fixes to meet the deadline',
+        ],
+        correctIndex: 0,
+        hint: 'Recovery includes validation and enhanced monitoring.',
+        walkthrough: 'Make customers whole, then return the feature gradually with the new controls and tight monitoring, because attackers often try again once a service comes back. The system owner decides when to go live, informed by the IR team\'s validation.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Lessons Learned',
+        evidence: r`Timeline: first stuffing traffic 3 days before detection; detected by customer complaints
+Teams noted: unclear who could approve disabling a feature; executives called responders directly`,
+        question: 'Which lessons-learned outputs are most valuable?',
+        options: [
+          'Identify the employee to blame',
+          'Buy a new SIEM',
+          'Archive the logs and close the ticket',
+          'A blameless report with timeline and root causes, plus actions: alerts on login failure spikes and transfer anomalies, a pre-approved authority list for disabling features, and a comms plan that routes executive questions through the commander',
+        ],
+        correctIndex: 3,
+        hint: 'Focus on detection delay and the coordination problems.',
+        walkthrough: 'The three-day detection gap and the coordination friction are the key findings. Specific detections, pre-agreed decision authority, and a communication structure feed directly back into Preparation, which closes the PICERL loop. Blame discourages reporting and does not fix systems.',
+      },
+    ],
+  },
+  {
+    id: 'lab-28',
+    title: 'Enumeration of a Legacy File Server',
+    domain: 2,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'The SIEM shows a burst of SMB and RPC connections from a contractor laptop (10.20.15.77) to OLD-FS (10.20.9.60), a Windows Server 2008 R2 box kept for an archive application. The contractor is supposed to be testing a printer. Work out what was enumerated, what it exposed, and how to reduce the risk.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Recognize the activity',
+        evidence: r`Zeek smb_mapping.log / dce_rpc.log  src 10.20.15.77 -> 10.20.9.60
+14:02:10  tree: \\OLD-FS\IPC$   (anonymous)
+14:02:11  dce_rpc  samr  SamrEnumerateUsersInDomain
+14:02:12  dce_rpc  lsarpc  LsarLookupSids (x 500)
+14:02:20  tree: \\OLD-FS\Archive$  (anonymous)  -> success`,
+        question: 'What is the laptop doing?',
+        options: [
+          'Printing documents',
+          'Windows Update',
+          'Anonymous (null session) enumeration: listing users via SAMR, RID cycling via LsarLookupSids, and accessing a hidden share without credentials',
+          'Joining the domain',
+        ],
+        correctIndex: 2,
+        hint: 'Anonymous connections to IPC$ followed by SAMR and LSA calls.',
+        walkthrough: 'Connecting anonymously to IPC$ and then calling SAMR user enumeration and hundreds of SID lookups is classic null-session enumeration (the kind tools like enum4linux and rpcclient perform). The successful anonymous access to Archive$ is the most serious finding.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Assess the exposure',
+        evidence: r`OLD-FS registry:
+HKLM\SYSTEM\CurrentControlSet\Control\Lsa  RestrictAnonymous = 0   RestrictAnonymousSAM = 0
+HKLM\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters  NullSessionShares = Archive$
+Archive$ content: 2009-2018 scanned HR files (contracts, IDs)`,
+        question: 'Why could the contractor read Archive$ without credentials?',
+        options: [
+          'The contractor had a domain account',
+          'SMB signing was disabled',
+          'Hidden shares are always public',
+          'Anonymous restrictions are off and Archive$ is explicitly listed in NullSessionShares, allowing unauthenticated access to sensitive HR scans',
+        ],
+        correctIndex: 3,
+        hint: 'Look at the NullSessionShares value.',
+        walkthrough: 'NullSessionShares explicitly permits anonymous access, and RestrictAnonymous = 0 allows enumeration. A "$" only hides a share from browse lists; it does not protect it. Sensitive HR scans were reachable by anyone on the network.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Determine what was taken',
+        evidence: r`Zeek files.log  src 10.20.9.60 -> 10.20.15.77  14:02:25-14:31:40
+files: 1,233   total bytes: 6.1 GB   mime types: application/pdf, image/tiff
+Example names: HR_contract_2014_*.pdf, passport_scan_*.tif`,
+        question: 'How should the exposure be described?',
+        options: [
+          'No files left the server',
+          'About 1,200 files (6.1 GB) of HR contracts and identity document scans were transferred to the contractor laptop, which is likely a reportable personal data breach',
+          'Only the user list was exposed',
+          'Only printer settings were read',
+        ],
+        correctIndex: 1,
+        hint: 'files.log records file transfers seen on the wire.',
+        walkthrough: 'Zeek can extract file metadata from SMB, showing count, size, and type. Passport scans and contracts are highly sensitive personal data. Bring in privacy and legal, and secure the laptop for examination.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Handle the person and the device',
+        evidence: r`Contractor agreement: allows device inspection on request
+Contractor manager: unaware of any file-server task
+Laptop: personal device, not company-managed`,
+        question: 'What is the right handling?',
+        options: [
+          'Confront the contractor on the floor and take the laptop',
+          'Ignore it because the device is personal',
+          'Work through HR, legal and the contractor\'s manager to request the device under the agreement, preserve it forensically, and remove the contractor\'s network access in the meantime',
+          'Remotely wipe the laptop',
+        ],
+        correctIndex: 2,
+        hint: 'Follow policy and preserve evidence; avoid actions that create legal risk.',
+        walkthrough: 'Insider and contractor cases need HR and legal involvement. The contract allows inspection, so request the device properly and image it. Remotely wiping a personal device would destroy evidence and could be unlawful. Cutting network access limits further harm.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Reduce the risk',
+        evidence: r`OLD-FS: unsupported OS, needed only for read access to archived records
+Network: flat; contractor laptops land on the same VLAN as servers
+Policy: no NAC for unmanaged devices`,
+        question: 'Which changes address the root causes?',
+        options: [
+          'Rename Archive$ to something harder to guess',
+          'Disable SMB on all servers',
+          'Remove the null-session share and enable anonymous restrictions now, then migrate the archive to a supported platform with access control, put unmanaged devices on a separate guest network with NAC, and segment servers from user VLANs',
+          'Ban all contractors',
+        ],
+        correctIndex: 2,
+        hint: 'Fix the server configuration, the platform, and the network placement.',
+        walkthrough: 'Immediate hardening closes anonymous access. Migrating off an unsupported OS removes a long tail of risk. NAC and segmentation keep unmanaged devices from reaching servers at all. Renaming a share is security through obscurity.',
+      },
+    ],
+  },
+  {
+    id: 'lab-29',
+    title: 'Path Traversal to Configuration Theft',
+    domain: 4,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A Node.js document portal (docs.corp.com) serves user manuals through /download?file=. The cloud bill shows new resources nobody created, and the database team saw logins from an unknown IP using the app\'s database account. Determine how the attacker obtained the app\'s secrets.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Search access logs',
+        evidence: r`nginx access.log (docs.corp.com)
+91.240.118.7 "GET /download?file=manual_v2.pdf HTTP/1.1" 200 2201331
+91.240.118.7 "GET /download?file=..%2f..%2f..%2fetc%2fpasswd HTTP/1.1" 200 1842
+91.240.118.7 "GET /download?file=..%2f..%2fapp%2f.env HTTP/1.1" 200 611
+91.240.118.7 "GET /download?file=..%2f..%2f..%2froot%2f.aws%2fcredentials HTTP/1.1" 403 32`,
+        question: 'What happened?',
+        options: [
+          'A user downloaded manuals',
+          'A brute-force login',
+          'SQL injection',
+          'Path traversal: the attacker escaped the manuals directory and read /etc/passwd and the application .env file; reading root\'s AWS credentials failed',
+        ],
+        correctIndex: 3,
+        hint: 'Decode %2f, then look at the status codes.',
+        walkthrough: '%2f is "/", so ../../app/.env walks up out of the downloads folder. The 200 responses mean the files were returned. The .env file usually holds database passwords, API keys, and cloud credentials, which explains the later activity.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find the vulnerable code',
+        evidence: r`app/routes/download.js
+14  const name = req.query.file;
+15  const full = path.join(__dirname, '../public/manuals', name);
+16  if (req.originalUrl.includes('../')) return res.status(400).send('bad');
+17  res.sendFile(full);`,
+        question: 'Why did the check on line 16 fail?',
+        options: [
+          'sendFile ignores paths',
+          'The check was never deployed',
+          'path.join removes ".."',
+          'The check looks for "../" in the raw URL, where the attacker sent the encoded form "..%2f", but the code then uses the decoded value; blocklist checks like this are easy to bypass with encoding',
+        ],
+        correctIndex: 3,
+        hint: 'Blocklists that look for one exact pattern are easy to bypass.',
+        walkthrough: 'Checking for "../" is fragile: encoding, double encoding, backslashes, or framework decoding order can defeat it. The robust fix is to resolve the final path and confirm it still sits inside the allowed directory (path.resolve then startsWith(baseDir + path.sep)), or better, map IDs to files from an allowlist.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Assess the stolen secrets',
+        evidence: r`app/.env (contents, secrets redacted in this view)
+DB_HOST=prod-db.internal  DB_USER=docs_app  DB_PASS=********
+AWS_ACCESS_KEY_ID=AKIA5DOCSEXAMPLE7Z9
+AWS_SECRET_ACCESS_KEY=********
+SESSION_SECRET=********
+SMTP_PASS=********`,
+        question: 'Which secrets must be treated as compromised?',
+        options: [
+          'All of them: database credentials, the AWS key, the session signing secret, and the SMTP password',
+          'Only the database password',
+          'None, since they are redacted here',
+          'Only the AWS key',
+        ],
+        correctIndex: 0,
+        hint: 'The attacker received the whole file.',
+        walkthrough: 'Every value in a leaked .env is exposed. The session secret matters too: with it, an attacker can forge session cookies for any user. The cloud bill and database logins show at least two secrets are already being used.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Scope use of the secrets',
+        evidence: r`CloudTrail (AKIA5DOCSEXAMPLE7Z9): RunInstances x 30 (c6i.32xlarge) in eu-north-1 from 91.240.118.7
+DB audit: docs_app login from 91.240.118.7  SELECT * FROM users (48,210 rows)
+App logs: no admin sessions created with forged cookies (checked by session ID origin)`,
+        question: 'What is the full impact?',
+        options: [
+          'Only cloud cost',
+          'Cryptomining instances in an unused region, a full read of the users table (48k rows), with no evidence so far of forged sessions',
+          'No impact because the attacker used a VPN',
+          'Only the passwd file was exposed',
+        ],
+        correctIndex: 1,
+        hint: 'Combine cloud, database, and application evidence.',
+        walkthrough: 'Large instances in a region the company does not use are typical of mining. The database read exposes user data and may require notification. Checking for forged sessions confirms one potential impact did not happen, which is worth stating explicitly.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Remediate',
+        evidence: r`Options:
+ a) Rotate DB password, AWS key, session secret, SMTP password
+ b) Terminate the 30 instances (snapshot first) and check all regions
+ c) Fix download.js with a resolved-path check or allowlist; deploy a WAF rule for traversal patterns meanwhile
+ d) Move secrets out of .env into a secrets manager with an IAM role instead of static keys`,
+        question: 'Which plan is complete?',
+        options: [
+          'c only',
+          'b only',
+          'a only',
+          'a, b, c and d, plus a privacy assessment for the users table read',
+        ],
+        correctIndex: 3,
+        hint: 'Stop the abuse, remove the attacker\'s keys, fix the bug, and reduce what a future bug could leak.',
+        walkthrough: 'Rotate everything that leaked, clean up cloud resources in every region, fix the vulnerable code, and stop keeping long-lived secrets in files the app can read. A role-based identity would have meant there was no AWS key to steal. The users table exposure needs privacy review.',
+      },
+    ],
+  },
+  {
+    id: 'lab-30',
+    title: 'DLL Side-Loading by a Trusted Application',
+    domain: 5,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'Application allowlisting only permits signed executables, yet EDR shows a signed, legitimate PDF reader updater making outbound connections to an unknown host from several finance PCs. The vendor says its updater only contacts its own update servers. Find out how a trusted binary is running untrusted code.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Look at what the signed binary loaded',
+        evidence: r`FIN-WS31 Sysmon EventID 7 (Image loaded)
+Image: C:\Users\Public\Documents\upd\PdfUpdater.exe  (Signed: Valid, VendorCo)
+ImageLoaded: C:\Users\Public\Documents\upd\version.dll  (Signed: false)
+ImageLoaded: C:\Windows\System32\kernel32.dll  (Signed: Valid, Microsoft)
+Legit install path: C:\Program Files\VendorCo\Reader\PdfUpdater.exe`,
+        question: 'What is going on?',
+        options: [
+          'The vendor shipped a bad update',
+          'DLL side-loading: a legitimate signed executable was copied to a user-writable folder next to a malicious unsigned version.dll, which it loads instead of the system copy',
+          'kernel32.dll is malicious',
+          'A normal update process',
+        ],
+        correctIndex: 1,
+        hint: 'Where is the EXE running from, and where did version.dll come from?',
+        walkthrough: 'Windows searches the application\'s own directory first for many DLLs. Copying a signed EXE next to a malicious DLL with an expected name makes the trusted process load attacker code. Allowlisting only checked the EXE signature, so it allowed this.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find how the files arrived',
+        evidence: r`FIN-WS31 timeline
+10:02  outlook.exe saved attachment "Q1_Statement.zip"
+10:03  explorer.exe extracted to C:\Users\Public\Documents\upd\ (PdfUpdater.exe, version.dll, Statement.pdf.lnk)
+10:03  Statement.pdf.lnk -> target: C:\Users\Public\Documents\upd\PdfUpdater.exe`,
+        question: 'How did the attack start?',
+        options: [
+          'Exploit of the PDF reader',
+          'A USB drive',
+          'A phishing ZIP containing a shortcut disguised as a PDF that launched the signed EXE beside the malicious DLL',
+          'A drive-by download',
+        ],
+        correctIndex: 2,
+        hint: 'What did the .lnk file point to?',
+        walkthrough: 'The ZIP bundled everything needed: a shortcut named like a PDF, the trusted EXE, and the malicious DLL. Double-clicking the "PDF" ran the EXE, which side-loaded the DLL. Blocking LNK files in email attachments and archives would have stopped this.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Check for persistence',
+        evidence: r`HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+  VendorCoUpdate  "C:\Users\Public\Documents\upd\PdfUpdater.exe /silent"
+Scheduled tasks: none new
+Services: none new`,
+        question: 'How does the implant survive reboots?',
+        options: [
+          'It does not',
+          'WMI subscription',
+          'A new service',
+          'A per-user Run key named like the vendor\'s updater launches the side-loading EXE at each logon',
+        ],
+        correctIndex: 3,
+        hint: 'Check the Run key path.',
+        walkthrough: 'Pointing a Run key at the signed EXE in the Public folder means every logon re-triggers the side-load. Autoruns-style reviews that only flag unsigned executables miss this because the launched EXE is validly signed; the path is the giveaway.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Hunt across the fleet',
+        evidence: r`EDR query: Sysmon 7 where Image signed by VendorCo AND ImageLoaded unsigned AND path not under Program Files
+Results: 6 hosts (FIN-WS31, FIN-WS12, FIN-WS40, HR-WS07, HR-WS19, EXEC-LT02)
+Hash of version.dll: identical on all 6
+Email gateway: "Q1_Statement.zip" delivered to 23 users`,
+        question: 'What does the hunt tell you?',
+        options: [
+          'Six hosts across finance, HR and an executive laptop ran the same side-loaded DLL, and 17 other recipients may still open the attachment',
+          'Only one host is infected',
+          'The vendor is compromised',
+          'The query is too broad to be useful',
+        ],
+        correctIndex: 0,
+        hint: 'Compare infected hosts with delivered emails.',
+        walkthrough: 'A behaviour-based hunt (trusted signer, unsigned DLL, unusual path) finds all infected hosts. The difference between deliveries and infections shows who might still be at risk, so purge the email now. An executive laptop raises the priority.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Contain and harden',
+        evidence: r`Allowlisting policy: allow by publisher signature for EXEs; DLL rules not enforced
+Email: ZIP attachments allowed, contents not inspected
+Users can write to C:\Users\Public`,
+        question: 'Which response is most complete?',
+        options: [
+          'Isolate the 6 hosts, purge the email from all 23 mailboxes, remove the Run keys and files after evidence collection, block the C2, and harden: enforce DLL rules or block execution from user-writable paths, inspect or block LNK inside archives, and alert on signed EXEs loading unsigned DLLs outside install paths',
+          'Uninstall the PDF reader everywhere',
+          'Block the vendor\'s update server',
+          'Reset all passwords in the company',
+        ],
+        correctIndex: 0,
+        hint: 'Contain, eradicate, and close the gaps that let a signed binary be abused.',
+        walkthrough: 'The vendor is not at fault; its binary was abused. Contain the infected hosts and stop further infections, then close the gaps: allowlisting that also covers DLLs or blocks execution from user-writable folders, mail filtering for LNK in archives, and a standing detection for this side-loading pattern.',
+      },
+    ],
+  },
 ];
