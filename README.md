@@ -15,7 +15,7 @@ npm run build    # production build in dist/
 - **Dashboard**: rank/XP HUD, daily streak, per-domain readiness bars, "Drill Weakest Domain", and a 10-question "Quick Triage" drill.
 - **Flashcards**: 3D flip cards. `Space` flips, `1`/`2`/`3` rate *Needs Review* / *Familiar* / *Mastered* with spaced-repetition requeueing. Filter by domain and tag.
 - **Exam Bank (200 MCQs)**: filter by domain, difficulty, unanswered or missed. *Study Mode* explains the answer and the distractors instantly. *Exam Simulation* is timed, supports flagging, and ends with a per-domain score breakdown.
-- **Incident Labs (18)**: split-pane SOC workstation with ticket and evidence on the left and a 5-step investigation on the right. Hints cost 25 XP, and every step has a walkthrough.
+- **Incident Labs (24)**: split-pane SOC workstation with ticket and evidence on the left and a 5-step investigation on the right. Hints cost 25 XP, and every step has a walkthrough.
 - **Bulk Import**: paste or upload JSON, a JS array, or a JS module (`export const x = [...]`) of questions, flashcards, or labs. Items are validated against the schemas below and duplicates (by `id`) are skipped.
 
 ### XP and ranks
@@ -40,7 +40,7 @@ Ranks: Tier 1 Triage (0) → Tier 2 Responder (1,500) → Tier 3 Threat Hunter (
 | `src/data/questions_d4.js` | 40 MCQs: SQLi, XSS, SSRF, IDOR, command injection, Apache/Nginx log forensics |
 | `src/data/questions_d5.js` | 40 MCQs: Windows/Linux persistence, pivoting, anti-forensics, prompt injection and LLM security |
 | `src/data/flashcards.js` | 40 flashcards |
-| `src/data/labs.js` | 18 five-step labs |
+| `src/data/labs.js` | 24 five-step labs |
 
 ```js
 // Flashcard

