@@ -10218,4 +10218,983 @@ C) Reboot and image the disk`,
       },
     ],
   },
+  {
+    id: 'lab-102',
+    title: 'Forensic Readiness Gaps Exposed by an Incident',
+    domain: 1,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'An attacker was in the network for 41 days before detection. When IR started, many questions could not be answered because logs were missing. Leadership asks what to change so the next investigation has the data it needs.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review what was missing',
+        evidence: r`Investigation gaps
+- Domain controller Security logs: retained 7 days (rolled over)
+- Firewall logs: kept 14 days locally, not forwarded
+- PowerShell script block logging: disabled
+- VPN logs: only successful logins kept`,
+        question: 'Which gap hurt the investigation most given a 41-day dwell time?',
+        options: [
+          'PowerShell logging only',
+          'Seven-day DC log retention, since all authentication evidence from most of the intrusion was gone',
+          'VPN failure logs only',
+          'None of them mattered',
+        ],
+        correctIndex: 1,
+        hint: 'Compare retention to dwell time.',
+        walkthrough: 'Retention shorter than typical dwell time means the earliest and most important activity is lost. Authentication logs from DCs are central to reconstructing lateral movement.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Set retention targets',
+        evidence: r`Industry data: median dwell time ~10 days, but long-tail intrusions exceed 90 days
+Storage cost estimate: hot 30 days, warm/cold 12 months`,
+        question: 'What is a sensible retention approach?',
+        options: [
+          'Keep key security logs searchable for at least 90 days and archived for 12 months or more',
+          'Keep everything hot forever',
+          'Keep 7 days and rely on EDR',
+          'Delete logs after each audit',
+        ],
+        correctIndex: 0,
+        hint: 'Balance cost with long intrusions.',
+        walkthrough: 'Tiered storage keeps recent data fast and older data cheap. Many frameworks suggest at least 12 months of retention for security logs, with 90 days easily searchable.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Enable missing telemetry',
+        evidence: r`Planned changes
+- GPO: PowerShell Script Block Logging + Module Logging
+- Advanced audit: Process Creation (4688) with command line
+- Sysmon with a vetted config on servers
+- VPN: log failures and source IPs`,
+        question: 'Why enable command-line logging for process creation?',
+        options: [
+          'It speeds up Windows',
+          'It shows exactly what was run, which is critical for understanding attacker actions',
+          'It replaces EDR',
+          'It is required for logons',
+        ],
+        correctIndex: 1,
+        hint: 'A process name alone hides most of the story.',
+        walkthrough: 'Knowing that powershell.exe ran is weak evidence. Its full command line, plus script block logging, reveals the actual commands and decoded scripts.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Centralize and protect logs',
+        evidence: r`Current: logs stay on each device; local admins can clear them.
+Proposed: forward to SIEM within minutes; SIEM write-once storage; separate admin accounts.`,
+        question: 'Why does forwarding protect evidence?',
+        options: [
+          'It makes logs smaller',
+          'Forwarding encrypts the disks',
+          'Attackers who clear local logs cannot erase copies already sent to a separate system they do not control',
+          'It prevents all attacks',
+        ],
+        correctIndex: 2,
+        hint: 'Think about log tampering.',
+        walkthrough: 'Clearing logs is common. Near-real-time forwarding to an immutable store with separate admin rights keeps evidence intact even after host compromise.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prepare the people and process',
+        evidence: r`Readiness checklist
+- Pre-approved IR retainer and contact list
+- Documented evidence collection tools on a jump kit
+- Legal hold procedure
+- Regular tabletop exercises using real log sources`,
+        question: 'How do tabletop exercises improve forensic readiness?',
+        options: [
+          'They reveal missing data and unclear procedures before a real incident, when there is time to fix them',
+          'They replace logging',
+          'They are only for executives',
+          'They test hardware',
+        ],
+        correctIndex: 0,
+        hint: 'Find gaps in practice, not in a crisis.',
+        walkthrough: 'Exercises built on real questions (who logged into what, when) show whether the data exists. Fixing those gaps beforehand is the essence of forensic readiness.',
+      },
+    ],
+  },
+  {
+    id: 'lab-103',
+    title: 'Remote Triage Collection with KAPE',
+    domain: 1,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A suspected compromise affects a server in a remote data center. Shipping a full disk image would take days. You will use KAPE to collect a targeted triage package remotely and analyze it.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Choose targets',
+        evidence: r`KAPE targets considered
+!SANS_Triage   (event logs, registry hives, prefetch, $MFT, $J, LNK, jump lists, SRUM, browser)
+FileSystem     ($MFT, $LogFile, $J)
+WebServers     (IIS/Apache logs)`,
+        question: 'Why use a compound target like !SANS_Triage?',
+        options: [
+          'It gathers the most useful artifacts in one quick collection, giving broad coverage without imaging the whole disk',
+          'It copies the entire disk',
+          'It analyzes malware automatically',
+          'It only collects event logs',
+        ],
+        correctIndex: 0,
+        hint: 'Coverage vs size.',
+        walkthrough: 'Triage collections grab high-value artifacts, usually a few GB or less. They let you start analysis within hours, and you can request a full image later if needed.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Run the collection',
+        evidence: r`kape.exe --tsource C: --tdest \\ir-share\cases\C-221\SRV-DC04 --target !SANS_Triage,WebServers --vhdx SRV-DC04 --zip
+[i] Found 1,882 files to copy (locked files via raw access)
+[i] Hashing enabled: SHA1`,
+        question: 'How does KAPE handle locked files like registry hives?',
+        options: [
+          'It reboots the system',
+          'It stops the services',
+          'It skips them',
+          'It reads them using raw disk access so it can copy files that Windows has open',
+        ],
+        correctIndex: 3,
+        hint: 'Hives are always locked on a live system.',
+        walkthrough: 'KAPE can read files through raw disk access, bypassing locks. Hashing during collection supports integrity, and VHDX output can be mounted for analysis.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Process with modules',
+        evidence: r`kape.exe --msource E:\C-221\SRV-DC04 --mdest E:\C-221\out --module !EZParser
+Outputs: EvtxECmd CSV, PECmd CSV, MFTECmd CSV, RECmd batch output, AmcacheParser CSV`,
+        question: 'What is the advantage of using modules after collection?',
+        options: [
+          'They upload data to the cloud',
+          'They delete the raw artifacts',
+          'They turn raw artifacts into consistent CSV outputs that can be filtered, joined, and loaded into a timeline tool',
+          'They remediate the host',
+        ],
+        correctIndex: 2,
+        hint: 'Raw hives and EVTX are not easy to read.',
+        walkthrough: 'Modules run parsers like Eric Zimmerman\'s tools. Standardized CSVs speed up analysis and make it repeatable across hosts.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Find the lead',
+        evidence: r`EvtxECmd output (Security 4624 + 4672)
+2026-11-21 23:12  LogonType 10 (RemoteInteractive)  Account: svc_sql  Source: 10.9.8.17
+PECmd: ADEXPLORER64.EXE  first run 2026-11-21 23:15`,
+        question: 'What do these results suggest?',
+        options: [
+          'A service account logged in interactively over RDP and an AD browsing tool ran minutes later, which is unusual and points to misuse',
+          'A normal service start',
+          'A scheduled backup',
+          'A Windows update',
+        ],
+        correctIndex: 0,
+        hint: 'Service accounts rarely use RDP.',
+        walkthrough: 'Interactive logons by service accounts and directory exploration tools are classic signs of an attacker using stolen credentials. Pivot to 10.9.8.17 next.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Scale out',
+        evidence: r`Next steps
+- Run the same KAPE target on 10.9.8.17 and 6 other servers where svc_sql logged on
+- Keep collection hashes and command lines in case notes`,
+        question: 'Why record the exact KAPE command lines in the case notes?',
+        options: [
+          'To share with the attacker',
+          'To reuse them as passwords',
+          'KAPE requires it',
+          'So the collection can be repeated and defended, showing exactly which artifacts were gathered and how',
+        ],
+        correctIndex: 3,
+        hint: 'Repeatability and defensibility.',
+        walkthrough: 'Documenting tool versions, targets, and options lets others reproduce or review the work and supports legal use of findings.',
+      },
+    ],
+  },
+  {
+    id: 'lab-104',
+    title: 'Spotting Web Vulnerability Scanners in Logs',
+    domain: 2,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'The e-commerce site\'s error rate jumped for twenty minutes overnight. No outage happened. The web team asks whether someone was attacking the site and whether anything got through.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Look at the error spike',
+        evidence: r`access.log, 02:10-02:30
+Requests: 41,200   Status 404: 36,980   Status 403: 2,100   Status 200: 2,050   Status 500: 70
+Top source: 203.0.113.140 (39,900 requests)`,
+        question: 'What does a large burst of 404s from one IP usually mean?',
+        options: [
+          'A broken link on the homepage',
+          'Automated scanning for files and paths that may exist',
+          'A DDoS from many sources',
+          'Normal search engine crawling',
+        ],
+        correctIndex: 1,
+        hint: 'Most requests asked for things that do not exist.',
+        walkthrough: 'Scanners request long lists of known paths. A single source producing tens of thousands of 404s in minutes is a strong scanning signal.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Identify the tool',
+        evidence: r`203.0.113.140 sample requests
+GET /phpmyadmin/  404   UA: Mozilla/5.00 (Nikto/2.5.0)
+GET /.env  404
+GET /admin/config.php.bak  404
+GET /index.php?id=1'  500`,
+        question: 'What do the user agent and paths reveal?',
+        options: [
+          'A CDN health check',
+          'A user browsing products',
+          'A Nikto-style scanner looking for admin panels, backup files, exposed configs, and injection points',
+          'A mobile app',
+        ],
+        correctIndex: 2,
+        hint: 'Read the UA and the target paths.',
+        walkthrough: 'Many scanners announce themselves in the user agent, though it can be changed. The paths cover common misconfigurations and the quote in id=1\' probes for SQL injection.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Check what succeeded',
+        evidence: r`Status 200 responses to 203.0.113.140 (non-public paths)
+GET /server-status  200  14 KB
+GET /backup/site_2025.zip  200  88 MB`,
+        question: 'Which result is most serious?',
+        options: [
+          'The 404s',
+          'The server-status page',
+          'The backup archive download, which may contain source code and secrets',
+          'None, scanners cannot download files',
+        ],
+        correctIndex: 2,
+        hint: '88 MB is a large file.',
+        walkthrough: 'A downloadable site backup can expose source code, config files, and database dumps. server-status also leaks internal details like client IPs and URLs and should be restricted.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Investigate the 500s',
+        evidence: r`500 responses to SQL-like payloads: 70
+App error log: "SQLSTATE[42000]: Syntax error ... near ''1'''"  /index.php?id=1'`,
+        question: 'What does this error suggest?',
+        options: [
+          'User input reaches a SQL query without parameterization, so the page is likely vulnerable to SQL injection',
+          'The database is offline',
+          'A normal validation message',
+          'The scanner crashed',
+        ],
+        correctIndex: 0,
+        hint: 'A SQL syntax error triggered by a quote.',
+        walkthrough: 'Database errors from a single quote show input is concatenated into SQL. Treat it as a vulnerability to fix immediately and check for exploitation attempts.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Respond',
+        evidence: r`Actions
+- Remove /backup/ from web root; rotate secrets found in the archive
+- Restrict /server-status to localhost
+- Fix the SQL query with prepared statements
+- Rate-limit or challenge sources with high 404 rates`,
+        question: 'Why rotate secrets even though the scanner might only be a researcher?',
+        options: [
+          'Once a file containing secrets is downloaded by an unknown party, you cannot know how it will be used',
+          'Rotation is required every month',
+          'Researchers always publish secrets',
+          'It is not necessary',
+        ],
+        correctIndex: 0,
+        hint: 'Assume the worst for exposed secrets.',
+        walkthrough: 'Intent is unknowable from logs. Anything in the archive, such as database or API credentials, must be rotated. Then fix the injection and reduce information exposure.',
+      },
+    ],
+  },
+  {
+    id: 'lab-105',
+    title: 'Exposed Elasticsearch Cluster Found Online',
+    domain: 2,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'An internet search engine for exposed devices lists an Elasticsearch cluster in your cloud account with no authentication, showing an index called app-logs. A ransom note index also appeared. Investigate and recover.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Confirm the exposure',
+        evidence: r`$ curl -s http://34.120.0.15:9200/_cat/indices?v
+health index         docs.count  store.size
+green  app-logs      42,100,000  61gb
+green  read_me_now   1           4kb
+$ curl -s http://34.120.0.15:9200/read_me_now/_search | head -c 200
+{"hits":{"hits":[{"_source":{"message":"All your data is backed up. Pay 0.05 BTC..."}}]}}`,
+        question: 'What does the read_me_now index indicate?',
+        options: [
+          'A developer test',
+          'Elasticsearch created it by default',
+          'An automated attacker found the open cluster and left an extortion note, and may have deleted or copied data',
+          'A backup index',
+        ],
+        correctIndex: 2,
+        hint: 'Ransom notes in open databases are common.',
+        walkthrough: 'Bots scan for unauthenticated databases, copy or delete data, and leave a note. Often they do not keep data at all. Assess what was there and whether it is intact.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find how it became public',
+        evidence: r`Cloud firewall rule: allow-es  source: 0.0.0.0/0  ports: tcp:9200
+Created by: terraform (module es-debug)  2026-10-30
+xpack.security.enabled: false`,
+        question: 'Which two settings combined to expose the data?',
+        options: [
+          'Using port 9200',
+          'Only the index name',
+          'The cluster\'s health being green',
+          'An open firewall rule to the internet on 9200 and Elasticsearch security disabled',
+        ],
+        correctIndex: 3,
+        hint: 'Network and authentication both failed.',
+        walkthrough: 'Either control alone would have prevented exposure. Defense in depth means both a restricted network and authentication.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Assess what was exposed',
+        evidence: r`Sample of app-logs documents
+{"ts":"...","path":"/api/login","body":{"email":"...","password":"..."}}
+{"ts":"...","headers":{"Authorization":"Bearer eyJ..."}}`,
+        question: 'Why are these log contents a serious problem?',
+        options: [
+          'Bearer tokens cannot be reused',
+          'Logs are never sensitive',
+          'Only timestamps were exposed',
+          'The logs contain user passwords and bearer tokens, so the exposure includes credentials, not just operational data',
+        ],
+        correctIndex: 3,
+        hint: 'Look at what the app logged.',
+        walkthrough: 'Logging request bodies and headers captured credentials and tokens. Anyone who read the cluster could take over accounts. This greatly increases the incident\'s severity.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain and recover',
+        evidence: r`Steps
+1. Remove the 0.0.0.0/0 rule; enable security with TLS and auth
+2. Snapshot current state for evidence
+3. Force password reset for affected users; revoke tokens
+4. Check access logs/flow logs for downloads`,
+        question: 'Why take a snapshot before cleaning up?',
+        options: [
+          'It is not useful',
+          'To restore the ransom note later',
+          'Snapshots make clusters faster',
+          'To preserve evidence of what was accessed or changed, including the ransom index, for investigation and possible legal use',
+        ],
+        correctIndex: 3,
+        hint: 'Preserve before changing.',
+        walkthrough: 'Evidence preservation comes before cleanup. VPC flow logs can show large outbound transfers from port 9200, indicating copying.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the logging practice',
+        evidence: r`Logging policy update
+- Never log passwords, tokens, or full request bodies for auth endpoints
+- Redaction middleware for Authorization headers
+- Data classification for log indices`,
+        question: 'Why fix logging even after securing the cluster?',
+        options: [
+          'Logs are copied to many systems; keeping secrets out of them limits damage from any future log exposure',
+          'Logs are deleted automatically',
+          'Elasticsearch requires redaction',
+          'It reduces CPU usage',
+        ],
+        correctIndex: 0,
+        hint: 'Logs spread widely.',
+        walkthrough: 'Secrets in logs end up in backups, SIEMs, and debug exports. Redacting at the source prevents repeat incidents regardless of where logs travel.',
+      },
+    ],
+  },
+  {
+    id: 'lab-106',
+    title: 'MFA Fatigue Push Bombing',
+    domain: 3,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'An employee approved an MFA push at 1 AM after receiving dozens of prompts and a phone call from "IT support." Minutes later the account signed in from another country. Investigate and stop the attack technique.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review the MFA log',
+        evidence: r`MFA log for d.ruiz
+00:41-00:58  push sent x 37   result: denied x 12, timeout x 24
+00:59        push sent        result: approved
+Sign-in 00:59 IP 203.0.113.209 (VPN provider)   App: Office 365`,
+        question: 'What attack pattern does this show?',
+        options: [
+          'MFA fatigue: repeated push requests until the user approves one to make them stop',
+          'A password spray',
+          'A SIM swap',
+          'A device code phish',
+        ],
+        correctIndex: 0,
+        hint: '37 prompts in under 20 minutes.',
+        walkthrough: 'The attacker already has the password and floods the user with push prompts. Tired or confused users eventually approve. A call from fake IT support often adds pressure.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Determine prior compromise',
+        evidence: r`Earlier: d.ruiz password found in an infostealer log dump (threat intel, 2026-11-10)
+d.ruiz reuses work password on a personal shopping site (per interview)`,
+        question: 'How did the attacker get the password?',
+        options: [
+          'Likely from malware on a personal device or a reused password exposed elsewhere',
+          'From the MFA server',
+          'From the help desk',
+          'From the push notification',
+        ],
+        correctIndex: 0,
+        hint: 'MFA only helps if the password is the first factor that fails.',
+        walkthrough: 'The push attack required a valid password. Infostealer logs and password reuse are common sources. Reset the password and educate on reuse.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Contain',
+        evidence: r`Post-login activity (00:59-01:20)
+New MFA method registered: authenticator on new phone
+Inbox rule: move messages containing "security" to RSS Feeds
+Teams message to finance: "please approve the attached invoice"`,
+        question: 'What must be removed during containment?',
+        options: [
+          'Nothing, the user can do it later',
+          'Only the inbox rule',
+          'Only the Teams message',
+          'The attacker\'s MFA method, the inbox rule, and all sessions, along with a password reset',
+        ],
+        correctIndex: 3,
+        hint: 'Remove every foothold.',
+        walkthrough: 'Registering a new MFA method keeps access after a password reset. The inbox rule hides alerts. The Teams message shows fraud attempts that need to be stopped and warned about.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Detect it earlier',
+        evidence: r`Detection idea: > 5 denied/timeout pushes for one user within 10 minutes
+Action: block push for that user and alert SOC`,
+        question: 'Why act on denied pushes rather than only approvals?',
+        options: [
+          'Many denied prompts are a strong sign the password is compromised, letting you respond before any approval',
+          'Denials are always user error',
+          'Approvals cannot be logged',
+          'It reduces license costs',
+        ],
+        correctIndex: 0,
+        hint: 'Signal comes before success.',
+        walkthrough: 'Repeated denials reveal an attacker with the password. Alerting and blocking pushes stops the attack and triggers a password reset before an approval happens.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Harden MFA',
+        evidence: r`Options
+A) Number matching + additional context (app, location) for push
+B) FIDO2 security keys or passkeys for admins and finance
+C) Allow SMS as backup`,
+        question: 'Which options resist fatigue attacks best?',
+        options: [
+          'C',
+          'A for all users and B for high-risk groups, since number matching requires the user to see the login screen and FIDO2 cannot be approved remotely',
+          'Disable MFA',
+          'Increase prompt frequency',
+        ],
+        correctIndex: 1,
+        hint: 'Approval without context is the weakness.',
+        walkthrough: 'Number matching means the user must enter a code shown on the attacker\'s screen, which they cannot see. FIDO2 binds authentication to the real site and device, so remote approval is impossible.',
+      },
+    ],
+  },
+  {
+    id: 'lab-107',
+    title: 'Detecting a Forged SAML Token Attack',
+    domain: 3,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'Following a breach of an on-premises server, the SOC sees sign-ins to cloud apps with no matching authentication events at the identity provider. Investigate whether the attacker stole the SAML token-signing key and is forging tokens.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Compare logs',
+        evidence: r`Cloud app sign-ins (SAML) for admin-it@corp.example
+2026-11-22 03:14  IP 198.51.100.88  Result: Success
+AD FS server logs (Event 1200/1202 token issued) for same user/time: none
+Domain controller 4769 for AD FS service from this user: none`,
+        question: 'What does the missing AD FS issuance event suggest?',
+        options: [
+          'The cloud app is down',
+          'AD FS logging is always incomplete',
+          'The user logged in normally',
+          'The SAML token was not issued by your identity provider, so it may have been forged with a stolen signing key',
+        ],
+        correctIndex: 3,
+        hint: 'Every legitimate token has an issuing event.',
+        walkthrough: 'A Golden SAML attack uses the stolen token-signing certificate to create tokens offline. Cloud apps accept them, but your IdP never logged issuing them.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find the key theft',
+        evidence: r`AD FS server ADFS-01
+Event 4662 on DC: read of AD FS DKM container object by CORP\svc_adfsbackup from 10.9.4.12
+AD FS admin log: Get-AdfsCertificate run by unknown session at 01:52
+EDR: process accessed AD FS configuration database`,
+        question: 'Why is access to the DKM container important?',
+        options: [
+          'It stores user passwords',
+          'The DKM key in Active Directory protects the AD FS token-signing private key, so reading it plus the config database can let an attacker extract the signing key',
+          'It holds DNS records',
+          'It is unrelated to AD FS',
+        ],
+        correctIndex: 1,
+        hint: 'The signing key is encrypted with a key stored in AD.',
+        walkthrough: 'AD FS encrypts its token-signing key using the Distributed Key Manager key stored in AD. An attacker with both can decrypt and steal it.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Assess the impact',
+        evidence: r`Federated apps trusting AD FS token-signing cert: Microsoft 365, AWS (SAML), Salesforce, ServiceNow
+Forged sign-ins found so far: M365 (admin-it), AWS (role OrgAdmin)`,
+        question: 'What is the scope of risk?',
+        options: [
+          'Only on-premises systems',
+          'Only Microsoft 365',
+          'Only the admin-it account',
+          'Every application trusting that signing certificate can be accessed as any user the attacker chooses',
+        ],
+        correctIndex: 3,
+        hint: 'The key signs identities for all federated apps.',
+        walkthrough: 'A stolen signing key lets the attacker impersonate any user to any relying party. Review each federated app\'s logs, not just the ones already seen.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: r`Plan
+- Rotate token-signing certificate twice (to clear both primary and secondary)
+- Update federation trust on every relying party
+- Rebuild AD FS servers; reset svc_adfsbackup and AD FS service account
+- Review admin actions in M365 and AWS for persistence (new users, keys, apps)`,
+        question: 'Why must every relying party be updated after rotation?',
+        options: [
+          'They must stop trusting the old certificate, otherwise forged tokens signed with it remain valid',
+          'To reset user passwords',
+          'For performance',
+          'It is optional',
+        ],
+        correctIndex: 0,
+        hint: 'Trust is defined at each relying party.',
+        walkthrough: 'Each app stores the IdP\'s public certificate. If the old one stays trusted, forged tokens still work. Rotating twice clears any secondary cert the attacker might also hold.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Reduce future risk',
+        evidence: r`Options
+- Migrate from AD FS to cloud-native authentication (fewer on-prem key stores)
+- Treat AD FS servers as Tier 0 assets
+- Alert on cloud sign-ins with no matching IdP issuance event
+- Use HSM-protected signing keys`,
+        question: 'Why treat AD FS servers as Tier 0?',
+        options: [
+          'They store email',
+          'Controlling them gives the same power as controlling the domain, since they can mint identities for all federated apps',
+          'They are file servers',
+          'They run printers',
+        ],
+        correctIndex: 1,
+        hint: 'Tier 0 is anything that controls identity.',
+        walkthrough: 'AD FS servers and their keys are as sensitive as domain controllers. Restrict admin access, monitor them closely, and consider moving to cloud authentication to remove the on-prem key.',
+      },
+    ],
+  },
+  {
+    id: 'lab-108',
+    title: 'Brute Forcing One-Time Codes',
+    domain: 4,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'Customers of a fintech app report account takeovers even though the app sends SMS one-time codes for login. The attacker appears to have only phone numbers and passwords from an old breach. Investigate how OTPs were bypassed.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Review the verification requests',
+        evidence: r`api.log
+POST /auth/verify-otp  user=7731  code=000117  401
+POST /auth/verify-otp  user=7731  code=000118  401
+... (9,402 requests in 6 minutes from 120 IPs)
+POST /auth/verify-otp  user=7731  code=004819  200`,
+        question: 'What is the attacker doing?',
+        options: [
+          'Replaying an old code',
+          'Guessing every possible 6-digit code in sequence until one works',
+          'Intercepting SMS',
+          'Using a stolen session cookie',
+        ],
+        correctIndex: 1,
+        hint: 'Sequential codes, many attempts.',
+        walkthrough: 'A 6-digit code has one million values. Without attempt limits, an attacker spreading requests across IPs can guess the code before it expires.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check the controls',
+        evidence: r`OTP settings
+length: 6   expiry: 15 minutes   max attempts per code: unlimited
+rate limit: 100 requests/min per IP`,
+        question: 'Which setting is the main weakness?',
+        options: [
+          'Expiry of 15 minutes',
+          'Six digits',
+          'Unlimited attempts per code, which makes the rate limit per IP easy to bypass with many IPs',
+          'The endpoint name',
+        ],
+        correctIndex: 2,
+        hint: 'Limits must be per account or per code, not per IP.',
+        walkthrough: 'Per-IP rate limits do not stop distributed guessing. The code itself must be invalidated after a few wrong guesses. A long expiry adds more guessing time.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Estimate success odds',
+        evidence: r`Attack rate observed: ~1,600 guesses/min across IPs
+Code space: 1,000,000; expiry 15 min`,
+        question: 'Roughly what chance does the attacker have per code before it expires?',
+        options: [
+          'About 2.4 percent per code, and they can simply request new codes, so success is likely over time',
+          'Zero',
+          '100 percent',
+          '0.0001 percent',
+        ],
+        correctIndex: 0,
+        hint: '24,000 guesses out of 1,000,000.',
+        walkthrough: '1,600 per minute for 15 minutes is 24,000 guesses, about 2.4 percent per code. Requesting new codes repeatedly makes takeover very likely across many accounts.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Scope and contain',
+        evidence: r`Accounts with > 50 failed OTP attempts then success: 63
+Of those, payments to new payees within 1 hour: 41`,
+        question: 'What should be done?',
+        options: [
+          'Change the SMS provider',
+          'Wait for customer complaints',
+          'Lock the 63 accounts, reverse or freeze recent payments with the bank, reset passwords, and notify customers',
+          'Only block the IPs',
+        ],
+        correctIndex: 2,
+        hint: 'Money moved quickly.',
+        walkthrough: 'Fast fraud response limits loss. The pattern query finds all victims. Password resets matter because the attacker has the passwords.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the design',
+        evidence: r`Proposed
+- Invalidate a code after 5 failed attempts; lock OTP flow after 3 bad codes per hour per account
+- Shorten expiry to 5 minutes
+- Bind the code to the login session that requested it
+- Detect credential stuffing earlier at /login`,
+        question: 'Why bind the OTP to the requesting session?',
+        options: [
+          'It encrypts the SMS',
+          'It makes SMS faster',
+          'It removes the need for passwords',
+          'It prevents a code from being used in a different session or flow than the one that requested it, limiting reuse and parallel guessing',
+        ],
+        correctIndex: 3,
+        hint: 'Context binding.',
+        walkthrough: 'Binding ties verification to one login attempt. Combined with per-code attempt limits and shorter expiry, guessing becomes impractical. Stopping credential stuffing at the password stage reduces exposure further.',
+      },
+    ],
+  },
+  {
+    id: 'lab-109',
+    title: 'Exploited WordPress Plugin on the Marketing Site',
+    domain: 4,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'The marketing WordPress site started redirecting some visitors to a scam page. The hosting provider flagged a PHP file uploaded to the uploads folder. Investigate, clean up, and harden.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Find the entry point',
+        evidence: r`access.log
+198.51.100.74 - - [23/Nov/2026:04:12:02] "POST /wp-admin/admin-ajax.php?action=fm_upload HTTP/1.1" 200 54
+198.51.100.74 - - [23/Nov/2026:04:12:05] "GET /wp-content/uploads/2026/11/cache.php?c=id HTTP/1.1" 200 41`,
+        question: 'What happened here?',
+        options: [
+          'A search engine crawl',
+          'An admin logged in normally',
+          'A theme update',
+          'An unauthenticated AJAX action in a plugin allowed a file upload, and the uploaded PHP file was then used to run commands',
+        ],
+        correctIndex: 3,
+        hint: 'A PHP file in uploads executed a command.',
+        walkthrough: 'Many plugin vulnerabilities expose AJAX actions without proper authorization or file type checks. A PHP file in uploads that responds to ?c= is a web shell.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Identify the vulnerable plugin',
+        evidence: r`wp plugin list
+name            status  version  update_available
+file-manager-x  active  6.4      7.2 (security fix CVE-2026-xxxx: unauthenticated upload)
+contact-form    active  5.9      none`,
+        question: 'What does this tell you?',
+        options: [
+          'All plugins were current',
+          'The site was running an outdated plugin with a known unauthenticated upload vulnerability',
+          'The contact form was the problem',
+          'WordPress core was vulnerable',
+        ],
+        correctIndex: 1,
+        hint: 'Compare installed and available versions.',
+        walkthrough: 'Outdated plugins are the leading cause of WordPress compromise. A public advisory for unauthenticated upload matches the log evidence.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Find the redirect',
+        evidence: r`grep -r "eval(base64_decode" wp-content/ --include=*.php -l
+wp-content/themes/brand/functions.php
+wp-content/uploads/2026/11/cache.php
+wp_options: siteurl ok; option "wp_footer_js" contains script injecting redirect for mobile users`,
+        question: 'Why do attackers place code in several locations?',
+        options: [
+          'WordPress requires it',
+          'To make the site faster',
+          'So the site stays compromised if one piece is found and removed',
+          'To fix bugs',
+        ],
+        correctIndex: 2,
+        hint: 'Layered persistence again.',
+        walkthrough: 'Attackers often modify theme files, add web shells, and inject database content. Cleaning only the file the host flagged leaves the redirect running.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Clean up',
+        evidence: r`Options
+A) Delete cache.php only
+B) Restore core/theme/plugins from clean sources, remove injected DB options, delete unknown PHP in uploads, rotate admin and DB passwords and WordPress salts
+C) Reinstall WordPress core only`,
+        question: 'Which option is correct?',
+        options: [
+          'Leave it and block the scam domain',
+          'A',
+          'C',
+          'B',
+        ],
+        correctIndex: 3,
+        hint: 'Clean every layer.',
+        walkthrough: 'Replace code from trusted sources, scrub the database, remove shells, and rotate secrets including salts so stolen cookies stop working. Check for new admin users too.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Harden',
+        evidence: r`Hardening
+- Remove unused plugins; enable auto-updates for plugins
+- Block PHP execution in wp-content/uploads
+- WAF virtual patch rules
+- File integrity monitoring on wp-content`,
+        question: 'Why block PHP execution in the uploads folder?',
+        options: [
+          'It speeds up images',
+          'Uploads should contain media only, so even if an attacker uploads a PHP file, the server will not run it',
+          'WordPress needs PHP there',
+          'It prevents SQL injection',
+        ],
+        correctIndex: 1,
+        hint: 'Uploaded files should never be code.',
+        walkthrough: 'Denying script execution in upload directories breaks the most common web shell path. Combined with prompt updates and fewer plugins, the attack surface shrinks a lot.',
+      },
+    ],
+  },
+  {
+    id: 'lab-110',
+    title: 'PowerShell Downgrade and AMSI Bypass Attempts',
+    domain: 5,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'Script block logging is enabled across the fleet, yet a host shows outbound C2 with almost no PowerShell logs. The SOC suspects the attacker evaded PowerShell security features. Investigate the evasion and close the gaps.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Spot the downgrade',
+        evidence: r`Windows PowerShell log (Event 400, Engine state changed)
+HostApplication=powershell.exe -version 2 -nop -w hidden -c ...
+EngineVersion=2.0`,
+        question: 'Why would an attacker run PowerShell version 2?',
+        options: [
+          'It is required for Windows 11',
+          'It is faster',
+          'PowerShell 2.0 lacks script block logging and AMSI, so commands run without those protections',
+          'It supports more modules',
+        ],
+        correctIndex: 2,
+        hint: 'What security features came after v2?',
+        walkthrough: 'Script block logging, AMSI integration, and other protections were added in PowerShell 5. If the 2.0 engine is installed, attackers can request it to evade them.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check if v2 is present',
+        evidence: r`Get-WindowsOptionalFeature -Online -FeatureName MicrosoftWindowsPowerShellV2Root
+State : Enabled
+.NET Framework 2.0/3.5: installed`,
+        question: 'What should be done with this feature?',
+        options: [
+          'Remove the PowerShell 2.0 feature across the fleet unless a documented dependency requires it',
+          'Leave it enabled',
+          'Upgrade it to 2.1',
+          'Disable PowerShell 5',
+        ],
+        correctIndex: 0,
+        hint: 'No v2 engine, no downgrade.',
+        walkthrough: 'Removing PowerShell 2.0 closes the downgrade path. Microsoft has deprecated it, and few systems still need it. Event 400 with EngineVersion 2.0 makes a good alert in the meantime.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Recognize an AMSI bypass attempt',
+        evidence: r`PowerShell Operational 4104 (script block, from another host)
+[Ref].Assembly.GetType('System.Management.Automation.' + 'Am' + 'siUtils') ... (reflection against an internal AMSI field; remainder redacted)
+Defender: AMSI detection "AmsiTamper" blocked`,
+        question: 'What is this script trying to do?',
+        options: [
+          'Update Windows Defender',
+          'Install AMSI',
+          'Disable AMSI in the current PowerShell session by tampering with an internal field, so later malicious scripts are not scanned',
+          'Read user files',
+        ],
+        correctIndex: 2,
+        hint: 'String splitting hides the keyword.',
+        walkthrough: 'AMSI lets antivirus inspect scripts at runtime. Attackers try to break it in-process. Even when it fails, the attempt itself is a high-confidence indicator worth alerting on.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Use other telemetry',
+        evidence: r`Process creation 4688 on host
+powershell.exe -version 2 ... (parent: wmiprvse.exe)
+Sysmon 3: powershell.exe -> 198.51.100.33:443`,
+        question: 'What does the parent process tell you?',
+        options: [
+          'The user opened PowerShell manually',
+          'PowerShell was launched by WMI, suggesting remote execution or WMI-based persistence',
+          'A scheduled update',
+          'It is from Explorer',
+        ],
+        correctIndex: 1,
+        hint: 'wmiprvse.exe is the WMI provider host.',
+        walkthrough: 'Even when PowerShell logs are thin, process creation and network telemetry fill gaps. WMI as parent points to remote execution, so check for WMI event subscriptions and the source host.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Harden PowerShell',
+        evidence: r`Controls
+- Remove PowerShell 2.0
+- Constrained Language Mode via WDAC for standard users
+- Alert on Event 400 EngineVersion=2.0 and on AMSI tamper detections
+- Restrict WinRM/WMI remote access to admin jump hosts`,
+        question: 'What does Constrained Language Mode do?',
+        options: [
+          'It translates scripts to another language',
+          'It limits PowerShell to core features, blocking direct .NET and Win32 API access that many attack scripts and bypasses rely on',
+          'It disables PowerShell entirely',
+          'It encrypts scripts',
+        ],
+        correctIndex: 1,
+        hint: 'Limits what scripts can call.',
+        walkthrough: 'CLM, enforced through WDAC, stops scripts from using reflection and arbitrary .NET types, breaking many bypass techniques while letting admins use approved scripts.',
+      },
+    ],
+  },
+  {
+    id: 'lab-111',
+    title: 'Dependency Confusion in the Build Pipeline',
+    domain: 5,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'A build agent began making DNS requests to an unknown domain right after a routine CI run. The project depends on an internal package called acme-auth-utils, hosted on a private registry. Investigate the supply chain compromise.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Check which package was installed',
+        evidence: r`CI log
+npm install
++ acme-auth-utils@99.1.0   (resolved: https://registry.npmjs.org/acme-auth-utils/-/acme-auth-utils-99.1.0.tgz)
+Internal registry latest: acme-auth-utils@2.4.3`,
+        question: 'What went wrong?',
+        options: [
+          'The internal package was updated',
+          'The build pulled a public package with the same name and a much higher version instead of the internal one',
+          'npm was offline',
+          'The lockfile was correct',
+        ],
+        correctIndex: 1,
+        hint: 'Where did it resolve from?',
+        walkthrough: 'In dependency confusion, an attacker publishes a public package with an internal name and a high version. If the client checks both registries and prefers the highest version, it installs the attacker\'s code.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Analyze the malicious package',
+        evidence: r`package.json (acme-auth-utils@99.1.0)
+"scripts": { "preinstall": "node collect.js" }
+collect.js: reads os.hostname(), env vars, ~/.npmrc; sends via DNS queries to *.d3p-cfz.example`,
+        question: 'Why is the preinstall script so dangerous?',
+        options: [
+          'It only runs when the app starts',
+          'It runs automatically during npm install, before any tests or code review, with access to the build environment\'s secrets',
+          'It requires user approval',
+          'It is sandboxed by npm',
+        ],
+        correctIndex: 1,
+        hint: 'Install scripts run with the build\'s permissions.',
+        walkthrough: 'Lifecycle scripts execute on install. CI environments hold tokens and credentials in environment variables and config files, so the attacker can collect them immediately.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Scope the exposure',
+        evidence: r`CI runner env during build: NPM_TOKEN (publish rights), AWS_ROLE (deploy), SONAR_TOKEN
+Builds that installed 99.1.0: 17 (3 repos) since 2026-11-24 10:02
+DNS logs: queries to *.d3p-cfz.example from 4 runners`,
+        question: 'Which secret is most urgent to rotate and why?',
+        options: [
+          'None, DNS cannot carry data',
+          'SONAR_TOKEN',
+          'NPM_TOKEN with publish rights, because the attacker could publish malicious versions of your real internal packages',
+          'Only the AWS role',
+        ],
+        correctIndex: 2,
+        hint: 'Which secret enables further supply chain attacks?',
+        walkthrough: 'All exposed secrets must be rotated, but a publish token could let the attacker poison your packages for everyone who installs them. Rotate it first, then the deploy credentials, and check for unauthorized publishes.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Check build outputs',
+        evidence: 'Artifacts built during the window: web-app images v5.12.0 - v5.12.3 (deployed to staging and production)',
+        question: 'What should happen to these artifacts?',
+        options: [
+          'Only delete staging builds',
+          'Keep them since tests passed',
+          'Treat them as untrusted: roll back to a build from before the window and rebuild from a clean environment after fixing resolution',
+          'Scan once and redeploy',
+        ],
+        correctIndex: 2,
+        hint: 'Code from the malicious package may be in the build.',
+        walkthrough: 'The package ran during the build and might have changed outputs. Roll back to known-good artifacts and rebuild after the dependency issue is fixed.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix dependency resolution',
+        evidence: r`Fixes
+- .npmrc: @acme:registry=https://npm.internal.acme.example (scoped packages)
+- Rename internal packages to the @acme scope; register the scope publicly
+- Use lockfiles with integrity hashes; npm ci in CI
+- Disable install scripts by default (ignore-scripts) where possible`,
+        question: 'Why does using a scope like @acme help?',
+        options: [
+          'It hides packages from developers',
+          'Scopes make packages faster',
+          'Scopes encrypt packages',
+          'Scoped packages resolve only from the registry configured for that scope, and owning the scope publicly prevents others from publishing under it',
+        ],
+        correctIndex: 3,
+        hint: 'Map names to a single trusted source.',
+        walkthrough: 'Scoping ties package names to a specific registry. Combined with lockfiles, integrity checks, and limiting install scripts, the build cannot quietly switch to a public lookalike.',
+      },
+    ],
+  },
 ];
